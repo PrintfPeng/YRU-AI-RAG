@@ -4,13 +4,27 @@ services:
   backend:
     build: .
     container_name: hybrid_rag_backend
-    ports:
-      - "8000:8000"
     volumes:
-      # เชื่อมโยงโค้ดในเครื่องเข้ากับ Container แบบ Real-time (แก้โค้ดปุ๊บ มีผลปั๊บ)
       - ./:/app
     env_file:
       - .env
-    # ให้ Container ใช้ Network ของเครื่องหลัก (เพื่อให้ต่อ MySQL และ Open WebUI ที่รันข้างนอกได้)
+    environment:
+      # ชี้ไปหา ChromaDB Container
+      - CHROMA_SERVER_HOST=localhost
+      - CHROMA_SERVER_PORT=8001
+    network_mode: "host"
+    restart: unless-stopped
+    depends_on:
+      - chromadb
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: hybrid_rag_chromadb
+    environment:
+      # เปลี่ยน Port เป็น 8001 เพื่อไม่ให้ชนกับ Backend (8000)
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_PORT=8001
+    volumes:
+      - ./chroma_db:/chroma/chroma
     network_mode: "host"
     restart: unless-stopped

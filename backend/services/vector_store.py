@@ -87,25 +87,47 @@ def get_vector_store(
         return _vectordb_cache[key]
 
     embeddings = get_embedding_model()
+    
+    import os
+    import chromadb
+    chroma_host = os.getenv("CHROMA_SERVER_HOST")
+    chroma_port = os.getenv("CHROMA_SERVER_PORT", "8001")
 
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        if chroma_host:
+            logger.info(f"[vector_store] Connecting to remote ChromaDB at {chroma_host}:{chroma_port}")
+            client = chromadb.HttpClient(host=chroma_host, port=chroma_port)
             vectordb = Chroma(
+                client=client,
                 collection_name=collection_name,
                 embedding_function=embeddings,
-                persist_directory=str(persist_path),
             )
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                vectordb = Chroma(
+                    collection_name=collection_name,
+                    embedding_function=embeddings,
+                    persist_directory=str(persist_path),
+                )
     except Exception as e:
         logger.exception("[vector_store] Failed to init Chroma: %s", e)
         # กลไกการฟื้นฟูระบบ (Auto-recovery): บังคับรวบรวมขยะในหน่วยความจำและทดลองเชื่อมต่ออีกครั้ง
         gc.collect()
         try:
-            vectordb = Chroma(
-                collection_name=collection_name,
-                embedding_function=embeddings,
-                persist_directory=str(persist_path),
-            )
+            if chroma_host:
+                client = chromadb.HttpClient(host=chroma_host, port=chroma_port)
+                vectordb = Chroma(
+                    client=client,
+                    collection_name=collection_name,
+                    embedding_function=embeddings,
+                )
+            else:
+                vectordb = Chroma(
+                    collection_name=collection_name,
+                    embedding_function=embeddings,
+                    persist_directory=str(persist_path),
+                )
         except Exception:
             raise HTTPException(
                 status_code=500,
