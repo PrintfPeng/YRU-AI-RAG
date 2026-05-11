@@ -23,3 +23,8 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Data folders
+chroma_db/
+uploads/
+ingested/

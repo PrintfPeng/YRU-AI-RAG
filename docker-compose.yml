@@ -1,1 +1,16 @@
-# ตั้งค่า NVIDIA Container Toolkit (GPU Passthrough)
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: hybrid_rag_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # เชื่อมโยงโค้ดในเครื่องเข้ากับ Container แบบ Real-time (แก้โค้ดปุ๊บ มีผลปั๊บ)
+      - ./:/app
+    env_file:
+      - .env
+    # ให้ Container ใช้ Network ของเครื่องหลัก (เพื่อให้ต่อ MySQL และ Open WebUI ที่รันข้างนอกได้)
+    network_mode: "host"
+    restart: unless-stopped
