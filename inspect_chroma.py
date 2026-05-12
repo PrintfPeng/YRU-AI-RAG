@@ -3,6 +3,10 @@ import sys
 import os
 from pathlib import Path
 
+# Fix encoding issue on Windows terminal (for Thai & emojis)
+if sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
 # เซ็ต Path ให้เข้าถึงโฟลเดอร์ backend ได้
 project_root = Path(__file__).resolve().parent
 sys.path.append(str(project_root))

@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # เซ็ต Path ให้ดึงไฟล์จากโฟลเดอร์ backend ได้
-project_root = Path(__file__).resolve().parent / "Data_Ingestion_Hybrid_RAG"
+project_root = Path(__file__).resolve().parent
 sys.path.append(str(project_root))
 load_dotenv(dotenv_path=project_root / ".env")
 
@@ -32,10 +32,11 @@ def main():
                 answer = generate_and_run_sql(query)
             else:
                 print("[RAG] 🔍 เริ่มต้นกระบวนการค้นหาเอกสารจาก ChromaDB...")
-                # สมมติว่าใน rag.py มีฟังก์ชัน answer_question(query) ให้เรียกใช้
-                # ถ้าฟังก์ชันชื่ออื่น สามารถแก้ตรงนี้ได้เลยครับ
+                import asyncio
                 try:
-                    answer = answer_question(query, chat_history=[])
+                    # RAG function returns a dict like {"answer": "...", "sources": [...]}
+                    rag_result = asyncio.run(answer_question(query=query))
+                    answer = rag_result.get("answer", "ไม่มีคำตอบ")
                 except Exception as e:
                     answer = f"Error in RAG: {e}"
                     

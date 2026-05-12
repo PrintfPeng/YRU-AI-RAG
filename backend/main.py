@@ -323,6 +323,39 @@ def list_documents():
     return {"documents": docs}
 
 # -----------------------------------------------------------
+# API: ตรวจสอบสถานะและข้อมูลภายใน ChromaDB (Database Dashboard)
+# -----------------------------------------------------------
+from .services.vector_store import get_collection_info, get_vector_store
+
+@app.get("/api/database/stats")
+def get_db_stats():
+    """ดึงสถิติภาพรวมของฐานข้อมูลเวกเตอร์"""
+    info = get_collection_info()
+    if "error" in info:
+        return {"status": "error", "message": info["error"]}
+    return {"status": "success", "data": info}
+
+@app.get("/api/database/sample")
+def get_db_samples(limit: int = 10):
+    """สุ่มตัวอย่างข้อมูลดิบจาก Vector Database"""
+    try:
+        vectordb = get_vector_store()
+        collection = vectordb._collection
+        raw_data = collection.get(limit=limit)
+        
+        results = []
+        if raw_data and raw_data.get('documents'):
+            for i in range(len(raw_data['documents'])):
+                results.append({
+                    "id": raw_data['ids'][i],
+                    "metadata": raw_data['metadatas'][i],
+                    "text": raw_data['documents'][i]
+                })
+        return {"status": "success", "data": results}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# -----------------------------------------------------------
 # API: Redirect หน้าแรกไปยังเว็บแอปพลิเคชัน
 # -----------------------------------------------------------
 @app.get("/")

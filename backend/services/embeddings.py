@@ -10,8 +10,8 @@ from langchain_openai import OpenAIEmbeddings
 # -------------------------------------------------------------------
 # Embedding Model Configuration
 # -------------------------------------------------------------------
-# ใช้โมเดล Embedding ที่โฮสต์อยู่บน Open WebUI Server ของคุณ
-_EMBEDDING_MODEL_NAME = "bge-m3"
+# ใช้โมเดล Embedding ที่โฮสต์อยู่บน Open WebUI Server ของมหาลัย
+_EMBEDDING_MODEL_NAME = "bge-m3:latest"
 
 # -------------------------------------------------------------------
 # Singleton Instance สำหรับจัดการหน่วยความจำ
