@@ -74,7 +74,7 @@ _DEFAULT_TEMPERATURE = 0.1
 _RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # การตั้งค่าเกณฑ์คัดกรองความแม่นยำ (Threshold Configurations)
-MIN_SCORE_THRESHOLD = 0.25 # เกณฑ์ความมั่นใจขั้นต่ำของเอกสาร
+MIN_SCORE_THRESHOLD = 0.05 # เกณฑ์ความมั่นใจขั้นต่ำของเอกสาร (ลดลงเพราะไม่มี CrossEncoder)
 MIN_KEYWORD_OVERLAP = 1    # ต้องมีคำสำคัญตรงกันอย่างน้อย 1 คำ สำหรับคำถามที่มีความยาว
 
 INTENT_THRESHOLDS = {
@@ -246,11 +246,13 @@ def _filter_relevant_docs(query: str, docs: list, min_score: float = MIN_SCORE_T
             continue
             
         # Guard 2: ตรวจสอบความเชื่อมโยงของคำสำคัญกรณีคำถามมีความยาว (Keyword Validation)
-        if len(query) > 10: 
+        # ข้ามการตรวจ keyword สำหรับ mysql source เพราะ PyThaiNLP ตัดคำทำให้ keyword ไม่ตรง
+        source_type = d.metadata.get("source", "text")
+        if source_type != "mysql" and len(query) > 10:
             overlap = _keyword_overlap_count(query, content)
             if overlap < MIN_KEYWORD_OVERLAP:
-                # อนุโลมให้ผ่านหากคะแนนความหมาย (Semantic Score) สูง แม้จะไม่พบคำค้นหาตรงตัว
-                if score < 0.75: 
+                # อนุโลมให้ผ่านหากคะแนนความหมาย (Semantic Score) สูง
+                if score < 0.10:
                     continue
 
         passed.append(d)
@@ -356,7 +358,10 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
         is_img_q = any(x in query_lower for x in ["รูปภาพ", "image", "logo", "กราฟ", "แผนภูมิ", "ถ่ายรูป"])
         is_tbl_q = any(x in query_lower for x in ["ตาราง", "table", "แบบฟอร์ม", "สถิติ"])
         
-        if is_img_q:
+        # mysql source ไม่ถูก penalty เพราะเป็นข้อมูลหลักของระบบ
+        if source_type == "mysql":
+            pass  # ไม่ลดคะแนน
+        elif is_img_q:
             if source_type != "image":
                 base_score *= 0.1  # ปรับลดคะแนนลงอย่างหนัก หากถามรูปแต่ได้ข้อความ
         elif is_tbl_q:
@@ -422,7 +427,9 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
     scored_docs.sort(key=lambda x: x.metadata.get("keyword_score", 0), reverse=True)
     for d in scored_docs:
         if d.metadata["ai_score"] == 0.0:
-            d.metadata["ai_score"] = 0.3 
+            # ถ้า keyword_score > 0 ให้ให้คะแนนตามคำสำคัญ ไม่งั้นให้ 0.1 เพื่อให้ผ่าน threshold
+            kw = d.metadata.get("keyword_score", 0)
+            d.metadata["ai_score"] = min(0.5, 0.1 + kw * 0.05)
     
     return scored_docs[:top_k]
 
