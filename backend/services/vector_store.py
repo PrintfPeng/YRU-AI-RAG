@@ -31,7 +31,7 @@ except Exception:
 # Database Configuration
 # -----------------------------------------------------------
 CHROMA_DIR = "chroma_db"
-COLLECTION_NAME = "documents"
+COLLECTION_NAME = "yru_planning_data"
 
 # ระบบแคชหน่วยความจำ (In-memory Cache) สำหรับลดภาระการเชื่อมต่อฐานข้อมูลซ้ำซ้อน
 _vectordb_cache: Dict[Tuple[str, str], Chroma] = {}
@@ -91,7 +91,7 @@ def get_vector_store(
     import os
     import chromadb
     chroma_host = os.getenv("CHROMA_SERVER_HOST")
-    chroma_port = os.getenv("CHROMA_SERVER_PORT", "8001")
+    chroma_port = os.getenv("CHROMA_SERVER_PORT", "8000")
 
     try:
         if chroma_host:
