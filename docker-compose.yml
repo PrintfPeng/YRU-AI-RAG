@@ -3,7 +3,7 @@ services:
     build: .
     container_name: hybrid_rag_backend
     ports:
-      - "8005:8005"
+      - "0.0.0.0:8005:8005"
     volumes:
       - ./:/app
     env_file:
@@ -22,7 +22,7 @@ services:
     image: chromadb/chroma:latest
     container_name: hybrid_rag_chromadb
     ports:
-      - "8000:8000"
+      - "0.0.0.0:8000:8000"
     volumes:
       - ./chroma_db:/chroma/chroma
     networks:

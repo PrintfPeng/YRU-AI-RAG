@@ -1,0 +1,19 @@
+#! chromadb-service.yaml
+# Generated code, do not edit
+apiVersion: v1
+kind: Service
+metadata:
+    name: chromadb-published
+    namespace: data-ingestion-hybrid-rag
+    labels:
+        com.docker.compose.project: data_ingestion_hybrid_rag
+        com.docker.compose.service: chromadb
+spec:
+    selector:
+        com.docker.compose.project: data_ingestion_hybrid_rag
+        com.docker.compose.service: chromadb
+    ports:
+        - name: chromadb-8000
+          port: 8000
+          protocol: TCP
+          targetPort: chromadb-8000

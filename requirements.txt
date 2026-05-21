@@ -4,6 +4,7 @@ python-dotenv
 mysql-connector-python
 langchain-core
 langchain-community
+langchain-chroma
 langchain-huggingface
 langchain-ollama
 langchain-openai

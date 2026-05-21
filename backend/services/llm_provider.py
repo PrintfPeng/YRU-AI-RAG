@@ -9,13 +9,13 @@ class LocalLLMProvider:
     @staticmethod
     def get_primary_llm(temperature: float = 0.1):
         """
-        เชื่อมต่อ Qwen2.5 ผ่าน OpenAI-Compatible API ของ Open WebUI
+        เชื่อมต่อ LLM ผ่าน OpenAI-Compatible API ของ Open WebUI
         Temperature ต่ำ (0.1) ตามกฎ Anti-Hallucination
         """
         return ChatOpenAI(
             api_key=os.getenv("OPEN_WEBUI_API_KEY"),
             base_url=os.getenv("OPEN_WEBUI_BASE_URL"),
-            model="qwen2.5:7b", # ต้องระบุชื่อให้ตรงกับใน Ollama/Open WebUI
+            model="scb10x/llama3.1-typhoon2-8b-instruct:latest", # ต้องระบุชื่อให้ตรงกับใน Ollama/Open WebUI
             temperature=temperature,
             max_tokens=1024,
             model_kwargs={"top_p": 0.9}
@@ -29,7 +29,7 @@ class LocalLLMProvider:
         return ChatOpenAI(
             api_key=os.getenv("OPEN_WEBUI_API_KEY"),
             base_url=os.getenv("OPEN_WEBUI_BASE_URL"),
-            model="llama3.1:8b", 
+            model="llama3:latest", 
             temperature=temperature,
             max_tokens=512,
         )
@@ -42,7 +42,7 @@ class LocalLLMProvider:
         return ChatOpenAI(
             api_key=os.getenv("OPEN_WEBUI_API_KEY"),
             base_url=os.getenv("OPEN_WEBUI_BASE_URL"),
-            model="qwen2.5:7b", 
+            model="scb10x/llama3.1-typhoon2-8b-instruct:latest", 
             temperature=0.0,
             model_kwargs={"response_format": {"type": "json_object"}} # บังคับให้ตอบเป็น JSON
         )

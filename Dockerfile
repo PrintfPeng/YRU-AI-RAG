@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir \
     mysql-connector-python \
     langchain-core \
     langchain-community \
+    langchain-chroma \
     langchain-ollama \
     langchain-openai \
     chromadb \

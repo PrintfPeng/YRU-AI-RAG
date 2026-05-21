@@ -9,7 +9,7 @@ import re
 import gc  # นำเข้าเพื่อใช้จัดการกระบวนการคืนหน่วยความจำและปลดล็อกไฟล์ (Memory/File Lock Management)
 
 from fastapi import HTTPException
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
 from .chunking import Chunk

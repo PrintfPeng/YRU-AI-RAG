@@ -8,11 +8,12 @@ import sys
 import os
 import re
 import time
-import hashlib  
-import json     
+import hashlib
+import json
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Internal services
@@ -34,6 +35,15 @@ app = FastAPI(
     title="AI Data Ingestion Backend",
     description="Backend for DB, Embeddings, RAG, API, and Evaluation",
     version="0.2.2 (Multi-Doc Final)",
+)
+
+# CORS Middleware: อนุญาตให้คนในเครือข่ายมหาวิทยาลัยเข้าถึงได้
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # อนุญาตทุก origin ในเครือข่ายท้องถิ่น
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 1. Mount Frontend: ให้บริการไฟล์ Static สำหรับหน้าเว็บ UI

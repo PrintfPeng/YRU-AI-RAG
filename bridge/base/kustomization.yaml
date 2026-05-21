@@ -1,0 +1,13 @@
+#! kustomization.yaml
+# Generated code, do not edit
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+    - 0-data-ingestion-hybrid-rag-namespace.yaml
+    - backend-deployment.yaml
+    - backend-expose.yaml
+    - backend-service.yaml
+    - chromadb-deployment.yaml
+    - chromadb-expose.yaml
+    - chromadb-service.yaml
+    - rag_network-network-policy.yaml

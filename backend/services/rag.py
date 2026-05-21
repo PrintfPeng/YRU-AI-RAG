@@ -74,8 +74,8 @@ _DEFAULT_TEMPERATURE = 0.1
 _RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # การตั้งค่าเกณฑ์คัดกรองความแม่นยำ (Threshold Configurations)
-MIN_SCORE_THRESHOLD = 0.05 # เกณฑ์ความมั่นใจขั้นต่ำของเอกสาร (ลดลงเพราะไม่มี CrossEncoder)
-MIN_KEYWORD_OVERLAP = 1    # ต้องมีคำสำคัญตรงกันอย่างน้อย 1 คำ สำหรับคำถามที่มีความยาว
+MIN_SCORE_THRESHOLD = 0.01  # ลดเกณฑ์ขั้นต่ำลงมากๆ เพราะไม่มี CrossEncoder → ใช้ Semantic Score จาก Vector Search แทน
+MIN_KEYWORD_OVERLAP = 1     # ต้องมีคำสำคัญตรงกันอย่างน้อย 1 คำ (ใช้เฉพาะกรณีมี CrossEncoder)
 
 INTENT_THRESHOLDS = {
     "qna_match": 0.20,
@@ -218,42 +218,79 @@ def _detect_general_intent(query: str) -> bool:
     return False
 
 def _keyword_overlap_count(query: str, text: str) -> int:
-    """ประเมินความสอดคล้องเบื้องต้นโดยใช้วิธีนับจุดตัดของคำสำคัญ (Keyword Intersection)"""
-    q_clean = re.sub(r'[^\w\s]', '', query).lower()
-    t_clean = re.sub(r'[^\w\s]', '', text).lower()
-    
-    q_tokens = set(q_clean.split())
-    t_tokens = set(t_clean.split())
-    
-    stopwords = {"คือ", "เป็น", "อยู่", "จะ", "ได้", "ที่", "ซึ่ง", "อัน", "ของ", "what", "is", "are", "the", "a", "an", "ครับ", "ค่ะ"}
-    q_tokens = q_tokens - stopwords
-    
-    if not q_tokens: return 0
-    return len(q_tokens.intersection(t_tokens))
+    """
+    ประเมินความสอดคล้องเบื้องต้น รองรับทั้งภาษาไทยและอังกฤษ
+    - ภาษาอังกฤษ: ใช้ word tokenization (split by space)
+    - ภาษาไทย: ใช้ character n-gram (bigram) เพราะไม่มีช่องว่างระหว่างคำ
+    """
+    q_clean = re.sub(r'[^\w\s\u0E00-\u0E7F]', '', query).lower().strip()
+    t_clean = re.sub(r'[^\w\s\u0E00-\u0E7F]', '', text).lower().strip()
+
+    # ตรวจจับว่าเป็นข้อความภาษาไทยเป็นหลักหรือไม่
+    thai_chars_in_query = len(re.findall(r'[\u0E00-\u0E7F]', q_clean))
+    is_thai_dominant = thai_chars_in_query > len(q_clean) * 0.3
+
+    if is_thai_dominant:
+        # วิธี 1: ตรวจสอบการมีอยู่ของ substring ตรงๆ (เร็วและแม่นยำที่สุดสำหรับภาษาไทย)
+        # ตัดคำสำคัญยาวๆ ออกมา (ความยาว >= 3 ตัวอักษร)
+        words_to_check = [w for w in q_clean.split() if len(w) >= 2]
+        # ถ้า query ไม่มีช่องว่าง (เป็นประโยคไทยต่อเนื่อง) ให้สร้าง bigram จาก query
+        if not words_to_check or (len(words_to_check) == 1 and len(q_clean) > 6):
+            # สร้าง n-gram (3-gram) จากตัวอักษรไทย
+            n = 3
+            q_ngrams = {q_clean[i:i+n] for i in range(len(q_clean) - n + 1) if q_clean[i:i+n].strip()}
+            t_ngrams = {t_clean[i:i+n] for i in range(len(t_clean) - n + 1) if t_clean[i:i+n].strip()}
+            return len(q_ngrams.intersection(t_ngrams))
+        else:
+            # นับว่ามีกี่คำจาก query ที่ปรากฏใน text
+            stopwords_th = {"คือ", "เป็น", "อยู่", "จะ", "ได้", "ที่", "ซึ่ง", "อัน", "ของ", "ครับ", "ค่ะ", "หรือ", "และ", "กับ"}
+            words_to_check = [w for w in words_to_check if w not in stopwords_th]
+            if not words_to_check:
+                return 1  # ถ้าเหลือแต่ stopwords ให้ผ่าน
+            return sum(1 for w in words_to_check if w in t_clean)
+    else:
+        # ภาษาอังกฤษ: ใช้ word split ตามเดิม
+        q_tokens = set(q_clean.split())
+        t_tokens = set(t_clean.split())
+        stopwords_en = {"what", "is", "are", "the", "a", "an", "of", "in", "on", "at", "to", "for"}
+        q_tokens = q_tokens - stopwords_en
+        if not q_tokens:
+            return 1
+        return len(q_tokens.intersection(t_tokens))
+
 
 def _filter_relevant_docs(query: str, docs: list, min_score: float = MIN_SCORE_THRESHOLD) -> list:
     """
-    คัดกรองเอกสารอย่างเข้มงวด ป้องกันการส่งข้อมูลที่ไม่เกี่ยวข้องให้ LLM 
-    เพื่อลดปัญหาอาการหลอนของโมเดล (Strict Guardrails for Anti-Hallucination)
+    คัดกรองเอกสารตามความเกี่ยวข้อง
+    [ปรับปรุง] ใช้เฉพาะ Score Threshold เป็นหลัก เพราะไม่มี CrossEncoder
+    Guard keyword ใช้เฉพาะกรณีที่ ai_score ต่ำมากๆ เท่านั้น เพื่อป้องกัน False Positive
     """
     passed = []
     for d in docs:
         score = d.metadata.get("ai_score", 0.0)
         content = d.page_content or ""
-        
+
         # Guard 1: ตรวจสอบความมั่นใจขั้นต่ำ (Score Threshold)
         if score < min_score:
+            logger.debug(f"[filter] BLOCKED by score ({score:.3f} < {min_score}): {str(content)[:60]}")
             continue
-            
-        # Guard 2: ตรวจสอบความเชื่อมโยงของคำสำคัญกรณีคำถามมีความยาว (Keyword Validation)
-        # ข้ามการตรวจ keyword สำหรับ mysql source เพราะ PyThaiNLP ตัดคำทำให้ keyword ไม่ตรง
+
+        # Guard 2 (ผ่อนปรน): ตรวจ keyword เฉพาะเมื่อ score ต่ำมากๆ และ source ไม่ใช่ mysql
+        # หากไม่มี CrossEncoder → ai_score จะมาจาก keyword scoring (fallback)
+        # ดังนั้นให้ผ่อนปรน keyword guard ลง เพื่อไม่ block เอกสารที่ vector search เจอมาแล้ว
         source_type = d.metadata.get("source", "text")
-        if source_type != "mysql" and len(query) > 10:
+        if not _HAS_RERANKER and source_type != "mysql":
+            # ไม่มี CrossEncoder → เชื่อ vector similarity + keyword fallback score
+            # Block เฉพาะกรณีที่ score ต่ำมาก (< 0.05) และ content สั้นเกินไป (< 20 ตัว)
+            if score < 0.05 and len(content.strip()) < 20:
+                logger.debug(f"[filter] BLOCKED (no reranker, low score + short content): {content[:40]}")
+                continue
+        elif source_type != "mysql" and len(query) > 15:
+            # มี CrossEncoder → ใช้ keyword guard ปกติ แต่ปรับ threshold ให้ผ่อนปรนขึ้น
             overlap = _keyword_overlap_count(query, content)
-            if overlap < MIN_KEYWORD_OVERLAP:
-                # อนุโลมให้ผ่านหากคะแนนความหมาย (Semantic Score) สูง
-                if score < 0.10:
-                    continue
+            if overlap < MIN_KEYWORD_OVERLAP and score < 0.15:
+                logger.debug(f"[filter] BLOCKED by keyword (overlap={overlap}, score={score:.3f})")
+                continue
 
         passed.append(d)
     return passed
@@ -314,7 +351,7 @@ def _generate_fallback_answer(docs, error_msg: str = "") -> str:
     
     joined_snippets = "\n\n".join(snippets)
     header = f"⚠️ **แจ้งเตือน ({error_msg}):** ระบบจึงดึงเนื้อหาที่เกี่ยวข้องจากเอกสารมาแสดงให้โดยตรงครับ:\n\n"
-              
+    
     return header + joined_snippets
 
 
@@ -344,12 +381,25 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
         content = (getattr(d, "page_content", "") or "").lower()
         base_score = 0.0
         
-        for term in query_terms:
-            if term in content:
-                base_score += 1.0
-        
-        if query.lower() in content:
-            base_score += 3.0
+        # ปรับปรุง: การตรวจจับคำสำคัญสำหรับภาษาไทย (Substring matching)
+        if len(query_terms) == 1 and len(query_terms[0]) > 4:
+            # กรณีภาษาไทยที่ไม่มีช่องว่าง ลองหาคำสำคัญย่อยๆ
+            # ถ้า query อยู่ใน content ตรงๆ ให้คะแนนสูง
+            if query.lower() in content:
+                base_score += 4.0
+            else:
+                # ลองตัดคำแบบหยาบๆ (n-gram)
+                q_text = query.lower()
+                for i in range(len(q_text) - 3):
+                    gram = q_text[i:i+4]
+                    if gram in content:
+                        base_score += 0.5
+        else:
+            for term in query_terms:
+                if len(term) > 1 and term in content:
+                    base_score += 1.0
+            if query.lower() in content:
+                base_score += 3.0
             
         # ปรับลดคะแนนเอกสารที่ไม่ตรงกับเจตนาของคำถาม (Intent Penalty Rules)
         source_type = str(getattr(d, "metadata", {}).get("source", "text")).lower()
@@ -423,14 +473,20 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
         except Exception as e:
             logger.warning(f"[rag] Re-ranking failed: {e}")
 
-    # 3. กระบวนการย้อนกลับกรณีโมเดล AI ขัดข้อง (Fallback to Keyword Sort)
+    # 3. กระบวนการย้อนกลับกรณีโมเดล AI ขัดข้อง (Fallback to Keyword + Vector Similarity Sort)
+    # [แก้ไข] ให้ ai_score สูงพอที่จะผ่าน MIN_SCORE_THRESHOLD อย่างชัดเจน
     scored_docs.sort(key=lambda x: x.metadata.get("keyword_score", 0), reverse=True)
-    for d in scored_docs:
-        if d.metadata["ai_score"] == 0.0:
-            # ถ้า keyword_score > 0 ให้ให้คะแนนตามคำสำคัญ ไม่งั้นให้ 0.1 เพื่อให้ผ่าน threshold
+    top_count = max(1, len(scored_docs))
+    for rank, d in enumerate(scored_docs):
+        if d.metadata.get("ai_score", 0.0) == 0.0:
             kw = d.metadata.get("keyword_score", 0)
-            d.metadata["ai_score"] = min(0.5, 0.1 + kw * 0.05)
-    
+            # คำนวณ score โดยให้ความสำคัญกับ: keyword score + ลำดับจาก vector search
+            # เอกสารที่ได้มาจาก vector search ล้วนมีความเกี่ยวข้องในระดับหนึ่งแล้ว
+            # ให้ baseline = 0.15 (ผ่าน threshold ชัดเจน) + bonus จาก keyword + penalty ตามลำดับ
+            rank_penalty = (rank / top_count) * 0.05  # ลดลงเล็กน้อยตามลำดับ
+            d.metadata["ai_score"] = min(0.6, 0.15 + kw * 0.05 - rank_penalty)
+            logger.debug(f"[rerank-fallback] doc rank={rank} kw={kw} ai_score={d.metadata['ai_score']:.3f}")
+
     return scored_docs[:top_k]
 
 
@@ -685,7 +741,15 @@ async def answer_question(
     try:
         # ดึงข้อมูลแบบเฉพาะเจาะจงเพื่อรักษาขอบเขตเนื้อหา
         raw_docs = search_similar(search_query, k=top_k*3, doc_ids=sanitized_doc_ids, sources=sources_filter, doc_types=doc_types)
-        logger.info(f"[rag] Found {len(raw_docs)} raw docs")
+        
+        if not raw_docs:
+            logger.warning(f"[rag] ❌ No documents found in Vector DB for query: '{search_query}'")
+            return {
+                "answer": "ไม่พบเนื้อหาที่เกี่ยวข้องในเอกสารที่เลือกไว้เลยครับ (ฐานข้อมูลอาจว่างเปล่าหรือไม่มีไฟล์นี้)",
+                "sources": [],
+                "intent": intent,
+                "mode": mode
+            }
 
         # จัดอันดับใหม่ด้วยระบบ AI Scoring
         docs = _rerank_documents(search_query, raw_docs, top_k)
@@ -694,6 +758,8 @@ async def answer_question(
         relevant_docs = _filter_relevant_docs(search_query, docs, min_score=MIN_SCORE_THRESHOLD)
         
         if not relevant_docs:
+            logger.info(f"[rag] ⚠️ All {len(docs)} docs were filtered out. Best score: {docs[0].metadata.get('ai_score', 0):.4f}")
+            
             qna_match = _find_best_qna_answer_from_docs(search_query, docs) 
             if qna_match:
                 return {
@@ -703,15 +769,21 @@ async def answer_question(
                     "mode": f"{mode}+qna"
                 }
             
-            return {
-                "answer": "ไม่พบข้อมูลที่ตรงกับคำถามในเอกสารที่แนบมาครับ (Relevance Score ต่ำเกินไป)",
-                "sources": [],
-                "intent": intent,
-                "mode": mode
-            }
+            # [Resilience Update] ถ้ามี docs และคะแนนตัวที่ดีที่สุดไม่ได้แย่มาก (เช่น > 0.005) ให้ปล่อยผ่านไป 1 ตัว
+            best_score = docs[0].metadata.get('ai_score', 0)
+            if best_score > 0.005:
+                logger.info(f"[rag] 🛡️ Emergency Bypass: Using best doc despite low score ({best_score:.4f})")
+                relevant_docs = [docs[0]]
+            else:
+                return {
+                    "answer": "ไม่พบข้อมูลที่ตรงกับคำถามในเอกสารที่แนบมาครับ (Relevance Score ต่ำเกินไป)",
+                    "sources": [],
+                    "intent": intent,
+                    "mode": mode
+                }
             
         docs = relevant_docs 
-
+        logger.info(f"[rag] ✅ Proceeding with {len(docs)} relevant docs. Top score: {docs[0].metadata.get('ai_score', 0):.4f}")
     except Exception as e:
         logger.error(f"[rag] Search failed: {e}")
         return {"answer": f"ระบบค้นหาขัดข้อง: {str(e)}", "sources": [], "intent": intent, "mode": mode}
@@ -864,15 +936,15 @@ async def answer_question(
     # หรือบังคับแสดงตารางอัตโนมัติเพื่อป้องกันจอดับ (Zero-Downtime Design)
     if not answer_text:
         if intent == "table" and found_table_ids:
-             answer_text = f"[SHOW_TABLE:TBL_{found_table_ids[0]}]" 
+            answer_text = f"[SHOW_TABLE:TBL_{found_table_ids[0]}]" 
         else:
-             logger.warning("[rag] ⚠️ All LLMs failed. Using Raw Fallback.")
-             return {
-                 "answer": _generate_fallback_answer(docs, "System Error"), 
-                 "sources": [], 
-                 "intent": intent, 
-                 "mode": f"{mode}+error"
-             }
+            logger.warning("[rag] ⚠️ All LLMs failed. Using Raw Fallback.")
+            return {
+                "answer": _generate_fallback_answer(docs, "System Error"), 
+                "sources": [], 
+                "intent": intent, 
+                "mode": f"{mode}+error"
+            }
     # -------------------------------------------------------------------
     # Post-Processing Phase: เรนเดอร์ส่วนประกอบ UI ทางฝั่งแบคเอนด์
     # -------------------------------------------------------------------

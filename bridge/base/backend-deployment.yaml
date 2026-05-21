@@ -1,0 +1,61 @@
+#! backend-deployment.yaml
+# Generated code, do not edit
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: backend
+    namespace: data-ingestion-hybrid-rag
+    labels:
+        com.docker.compose.project: data_ingestion_hybrid_rag
+        com.docker.compose.service: backend
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            com.docker.compose.project: data_ingestion_hybrid_rag
+            com.docker.compose.service: backend
+    strategy:
+        type: Recreate
+    template:
+        metadata:
+            labels:
+                com.docker.compose.project: data_ingestion_hybrid_rag
+                com.docker.compose.service: backend
+                com.docker.compose.network.rag_network: "true"
+        spec:
+            restartPolicy: unless-stopped
+            containers:
+                - name: hybrid-rag-backend
+                  image: data_ingestion_hybrid_rag-backend
+                  imagePullPolicy: IfNotPresent
+                  env:
+                    - name: CHROMA_SERVER_HOST
+                      value: "hybrid_rag_chromadb"
+                    - name: CHROMA_SERVER_PORT
+                      value: "8000"
+                    - name: DB_HOST
+                      value: "10.10.2.154"
+                    - name: DB_NAME
+                      value: "ai-sandbox_db"
+                    - name: DB_PASSWORD
+                      value: "9IKAjm.R7Qzm_OIZ"
+                    - name: DB_PORT
+                      value: "3306"
+                    - name: DB_USER
+                      value: "ai-sandbox-read"
+                    - name: OLLAMA_BASE_URL
+                      value: "http://localhost:11434"
+                    - name: OPEN_WEBUI_API_KEY
+                      value: "ollama"
+                    - name: OPEN_WEBUI_BASE_URL
+                      value: "http://10.20.41.229:11434/v1"
+                  ports:
+                    - name: backend-8005
+                      containerPort: 8005
+                  volumeMounts:
+                    - name: app
+                      mountPath: /app
+            volumes:
+                - name: app
+                  hostPath:
+                    path: D:\All-Source-Code\YRU-All-CODE\YRU-AI-SPACE-NEW\Data_Ingestion_Hybrid_RAG
