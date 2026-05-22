@@ -1,176 +1,393 @@
 # backend/services/sql_agent.py
 import os
 import re
-import traceback
+import time
+import hashlib
 import mysql.connector
-from dotenv import load_dotenv
+from typing import Optional
 from langchain_core.prompts import PromptTemplate
 from backend.services.llm_provider import LocalLLMProvider
 
-# 1. โหลด Environment Variables ทันทีที่ไฟล์ถูกเรียกใช้
-load_dotenv()
 
-def get_db_connection():
-    """ศูนย์รวมการเชื่อมต่อฐานข้อมูล ลดการเขียนโค้ดซ้ำซ้อน"""
+# ---------------------------------------------------------------------------
+# Curated table list: only the 12 core tables the LLM needs to know about.
+# Sending all 97 tables confuses the 8B model and causes wrong SQL.
+# ---------------------------------------------------------------------------
+_CORE_TABLES = [
+    'projects',
+    'project_template_years',
+    'departments',
+    'statuses',
+    'plans',
+    'strategics',
+    'missions',
+    'outputs',
+    'goal_templates',
+    'tactic_templates',
+    'programs',
+    'sdg_templates',
+]
+
+# Explicit relationship map injected into the SQL prompt
+_TABLE_RELATIONSHIPS = """
+=== ความสัมพันธ์ระหว่างตาราง ===
+-- Integer FK (JOIN ด้วย id):
+projects.project_template_year_id → project_template_years.id   → project_template_years.year (ปี พ.ศ.)
+projects.department_id            → departments.id               → departments.name (หน่วยงาน/คณะ/สำนัก)
+projects.plan_id                  → plans.id                     → plans.name (แผนงาน)
+projects.strategic_id             → strategics.id                → strategics.name (ยุทธศาสตร์)
+projects.mission_id               → missions.id                  → missions.name (พันธกิจ)
+projects.output_id                → outputs.id                   → outputs.name (ผลผลิต)
+projects.tactic_id                → tactic_templates.id          → tactic_templates.name (กลยุทธ์)
+projects.goal_id                  → goals.id → goals.goal_template_id → goal_templates.name (เป้าหมาย)
+-- *** พิเศษ: status_id เป็น VARCHAR slug ไม่ใช่ integer ***
+projects.status_id (varchar)      → statuses.status              → statuses.name (สถานะโครงการ)
+-- JOIN ถูกต้อง: JOIN statuses s ON s.status = p.status_id
+-- ห้ามใช้:      JOIN statuses s ON s.id = p.status_id  (ผิด!)
+=========================================
+"""
+
+# SQL examples to guide the LLM toward correct patterns
+_SQL_EXAMPLES = """
+=== ตัวอย่าง SQL ที่ถูกต้อง ===
+
+-- ดูรายชื่อหน่วยงาน/คณะ/สำนักทั้งหมด:
+SELECT id, name AS ชื่อหน่วยงาน, level FROM departments WHERE deleted_at IS NULL ORDER BY level, id;
+
+-- ดูโครงการพร้อมชื่อหน่วยงานและสถานะ (status_id คือ VARCHAR slug):
+SELECT p.id, d.name AS หน่วยงาน, s.name AS สถานะ, p.principle, pty.year
+FROM projects p
+JOIN departments d ON d.id = p.department_id
+JOIN statuses s ON s.status = p.status_id
+JOIN project_template_years pty ON pty.id = p.project_template_year_id
+WHERE pty.year = 2566 LIMIT 10;
+
+-- นับโครงการแยกตามหน่วยงาน:
+SELECT d.name AS หน่วยงาน, COUNT(*) AS จำนวนโครงการ
+FROM projects p
+JOIN departments d ON d.id = p.department_id
+WHERE p.deleted_at IS NULL
+GROUP BY d.id, d.name ORDER BY จำนวนโครงการ DESC;
+
+-- งบประมาณรวมตามหน่วยงานในปี 2566:
+SELECT d.name AS หน่วยงาน,
+       SUM(p.budget1 + p.budget2 + p.budget3 + p.budget4) AS งบรวม
+FROM projects p
+JOIN departments d ON d.id = p.department_id
+JOIN project_template_years pty ON pty.id = p.project_template_year_id
+WHERE pty.year = 2566 AND p.deleted_at IS NULL
+GROUP BY d.id, d.name ORDER BY งบรวม DESC;
+
+-- ดูโครงการในปี 2566 ของหน่วยงานหนึ่ง (กรองด้วย d.name LIKE ไม่ใช่ project_template_years.name):
+SELECT p.id, d.name AS หน่วยงาน, s.name AS สถานะ, p.principle
+FROM projects p
+JOIN departments d ON d.id = p.department_id
+JOIN statuses s ON s.status = p.status_id
+JOIN project_template_years pty ON pty.id = p.project_template_year_id
+WHERE pty.year = 2566 AND d.name LIKE '%สำนักงานอธิการบดี%' AND p.deleted_at IS NULL
+LIMIT 20;
+
+-- ดูยุทธศาสตร์ทั้งหมดในปี 2566:
+SELECT id, sequence AS ลำดับ, name AS ชื่อยุทธศาสตร์ FROM strategics
+WHERE year = 2566 AND deleted_at IS NULL ORDER BY sequence;
+==============================================
+"""
+
+
+# ---------------------------------------------------------------------------
+# In-memory Query Result Cache (TTL = 5 minutes)
+# ---------------------------------------------------------------------------
+_SQL_CACHE: dict = {}
+_CACHE_TTL = 300  # seconds
+
+
+def _cache_key(query: str) -> str:
+    return hashlib.md5(query.strip().lower().encode()).hexdigest()
+
+
+def _get_cached(query: str) -> Optional[str]:
+    key = _cache_key(query)
+    if key in _SQL_CACHE:
+        answer, ts = _SQL_CACHE[key]
+        if time.time() - ts < _CACHE_TTL:
+            print(f"[SQL_Agent] Cache hit: '{query[:60]}'")
+            return answer
+        del _SQL_CACHE[key]
+    return None
+
+
+def _set_cache(query: str, answer: str):
+    if len(_SQL_CACHE) >= 200:
+        _SQL_CACHE.pop(next(iter(_SQL_CACHE)))
+    _SQL_CACHE[_cache_key(query)] = (answer, time.time())
+
+
+# ---------------------------------------------------------------------------
+# Year Normalization Helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_years(query: str) -> str:
+    """Convert CE years (<=2200) to BE years by adding 543."""
+    def replace_year(m):
+        y = int(m.group(0))
+        return str(y + 543) if y <= 2200 else str(y)
+    return re.sub(r'\b(19|20)\d{2}\b', replace_year, query)
+
+
+def _fix_sql_years(sql: str) -> str:
+    """Post-process generated SQL: fix CE year values to BE years."""
+    def _replace(m):
+        prefix, year = m.group(1), int(m.group(2))
+        return f"{prefix}{year + 543}" if year <= 2200 else m.group(0)
+    return re.sub(r'(=\s*)(\d{4})\b', _replace, sql)
+
+
+def _extract_be_year(query: str) -> Optional[int]:
+    """Extract BE year from query after normalization."""
+    normalized = _normalize_years(query)
+    match = re.search(r'\b(25\d\d)\b', normalized)
+    return int(match.group(1)) if match else None
+
+
+# ---------------------------------------------------------------------------
+# Fallback SQL Builder (used on retry after LLM generates invalid SQL)
+# ---------------------------------------------------------------------------
+
+def _build_fallback_sql(query: str) -> str:
+    """Safe fallback SQL using only verified columns."""
+    be_year = _extract_be_year(query)
+    count_keywords = ['กี่', 'จำนวน', 'นับ', 'count', 'รวม', 'ทั้งหมด']
+    dept_keywords = ['แผนก', 'หน่วยงาน', 'คณะ', 'สำนัก', 'ศูนย์']
+    is_count = any(kw in query for kw in count_keywords)
+    is_dept = any(kw in query for kw in dept_keywords)
+
+    if is_dept and not is_count:
+        return (
+            "SELECT id, name AS ชื่อหน่วยงาน, level "
+            "FROM departments WHERE deleted_at IS NULL ORDER BY level, id LIMIT 30"
+        )
+    if is_count and be_year:
+        return (
+            f"SELECT COUNT(*) AS total FROM projects p "
+            f"JOIN project_template_years pty ON pty.id = p.project_template_year_id "
+            f"WHERE pty.year = {be_year} AND p.deleted_at IS NULL"
+        )
+    if is_count:
+        return "SELECT COUNT(*) AS total FROM projects WHERE deleted_at IS NULL"
+    if be_year:
+        return (
+            f"SELECT p.id, d.name AS หน่วยงาน, s.name AS สถานะ, p.principle, "
+            f"p.budget1, p.budget2, p.budget3, p.budget4 "
+            f"FROM projects p "
+            f"JOIN departments d ON d.id = p.department_id "
+            f"JOIN statuses s ON s.status = p.status_id "
+            f"JOIN project_template_years pty ON pty.id = p.project_template_year_id "
+            f"WHERE pty.year = {be_year} LIMIT 20"
+        )
+    return (
+        "SELECT p.id, d.name AS หน่วยงาน, s.name AS สถานะ, p.principle "
+        "FROM projects p "
+        "JOIN departments d ON d.id = p.department_id "
+        "JOIN statuses s ON s.status = p.status_id "
+        "LIMIT 20"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Database Helpers
+# ---------------------------------------------------------------------------
+
+def _db_connect():
     return mysql.connector.connect(
         host=os.getenv("DB_HOST", "10.10.2.154"),
         user=os.getenv("DB_USER", "ai-sandbox-read"),
         password=os.getenv("DB_PASSWORD", "9IKAjm.R7Qzm_OIZ"),
         database=os.getenv("DB_NAME", "ai-sandbox_db"),
-        port=int(os.getenv("DB_PORT", 3306))
+        port=int(os.getenv("DB_PORT", 3306)),
+        connect_timeout=10,
+        charset='utf8mb4',
     )
 
+
 def get_db_schema() -> str:
+    """
+    Return curated schema for the 12 most relevant tables only.
+    Sending all 97 tables overwhelms the 8B model and causes wrong SQL.
+    """
     conn = None
     try:
-        conn = get_db_connection()
+        conn = _db_connect()
         cursor = conn.cursor()
-        
-        cursor.execute("SHOW TABLES;")
-        tables = [row[0] for row in cursor.fetchall()]
-        
         schema_text = ""
-        for table in tables:
-            cursor.execute(f"DESCRIBE `{table}`;")
-            columns = cursor.fetchall()
-            col_details = [f"{col[0]} ({col[1]})" for col in columns]
-            schema_text += f"Table: {table}\nColumns: {', '.join(col_details)}\n\n"
-            
+        for table in _CORE_TABLES:
+            try:
+                cursor.execute(f"DESCRIBE `{table}`;")
+                columns = cursor.fetchall()
+                col_details = [f"{col[0]} ({col[1]})" for col in columns]
+                schema_text += f"Table: {table}\nColumns: {', '.join(col_details)}\n\n"
+            except Exception:
+                pass
         return schema_text
     except Exception as e:
-        print(f"[SQL_Agent] ❌ Error fetching schema: {e}")
+        print(f"[SQL_Agent] Error fetching schema: {e}")
         return ""
     finally:
         if conn and conn.is_connected():
             cursor.close()
             conn.close()
 
-def clean_and_validate_sql(raw_text: str) -> str:
-    """
-    ฟังก์ชันสกัดและทำความสะอาด SQL จาก LLM อย่างชาญฉลาดและปลอดภัย
-    """
-    # 2. ค้นหาเฉพาะข้อมูลที่อยู่ใน Markdown Block (หาก AI ใส่มา)
-    code_block_match = re.search(r'```(?:sql|SQL)?\s*(.*?)\s*```', raw_text, flags=re.DOTALL)
-    if code_block_match:
-        sql = code_block_match.group(1).strip()
-    else:
-        sql = raw_text.strip()
-        
-    # 3. สลัดข้อความเกริ่นนำทิ้ง โดยมองหาคำว่า SELECT ตัวแรก
-    select_match = re.search(r'(?i)\bSELECT\b[\s\S]*', sql)
-    if not select_match:
-        raise ValueError("INVALID_SQL_TYPE")
-        
-    final_sql = select_match.group(0).strip()
-    
-    # 4. ตรวจสอบความปลอดภัยสูงสุด: คำสั่งจะต้องขึ้นต้นด้วย SELECT เท่านั้น
-    # วิธีนี้จะแก้ปัญหา False Positive จากคำว่า updated_at หรือ drop ได้ 100%
-    if not final_sql.upper().startswith("SELECT"):
-        raise ValueError("INVALID_SQL_TYPE")
-        
-    return final_sql
+
+def _run_sql(sql: str) -> list:
+    """Execute a SELECT query and return results as list of dicts."""
+    conn = _db_connect()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(sql)
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Main Entry Point
+# ---------------------------------------------------------------------------
 
 def generate_and_run_sql(query: str) -> str:
-    print("[SQL_Agent] 🔍 เริ่มต้นกระบวนการ Text-to-SQL...")
-    
+    """
+    Full pipeline:
+      1. Cache check
+      2. Year normalization
+      3. LLM -> SQL (curated schema + relationship hints)
+      4. SQL execution with auto-retry on errors
+      5. LLM -> Thai answer
+      6. Cache result
+    """
+    print("[SQL_Agent] เริ่มกระบวนการ Text-to-SQL...")
+
+    # 1. Cache check
+    cached = _get_cached(query)
+    if cached:
+        return cached
+
+    # 2. Year normalization
+    normalized_query = _normalize_years(query)
+    if normalized_query != query:
+        print(f"[SQL_Agent] Year normalized: '{query}' -> '{normalized_query}'")
+
+    # 3. Schema (curated, not all 97 tables)
     schema = get_db_schema()
     if not schema:
         return "ขออภัยครับ ไม่สามารถอ่านโครงสร้างฐานข้อมูลได้ในขณะนี้"
-        
-    try:
-        llm = LocalLLMProvider.get_primary_llm(temperature=0.0)
-    except Exception as e:
-        print(f"[SQL_Agent] ❌ Error initializing LLM: {e}")
-        return "ขออภัยครับ ไม่สามารถเชื่อมต่อกับโมเดล AI ได้"
-    
-    sql_prompt = PromptTemplate.from_template("""คุณคือ Data Analyst ที่เชี่ยวชาญภาษา MySQL
-นี่คือโครงสร้างตารางทั้งหมดในฐานข้อมูล:
-{schema}
 
-คำถามจากผู้ใช้: "{query}"
+    llm = LocalLLMProvider.get_primary_llm(temperature=0.0)
 
-จงเขียนคำสั่ง SQL ที่ถูกต้องเพื่อหาคำตอบสำหรับคำถามนี้
-ข้อบังคับ:
-- ห้ามใช้คำสั่งที่เป็นอันตราย (INSERT, UPDATE, DELETE, DROP) ใช้ได้แค่ SELECT เท่านั้น
-- ตอบกลับมาเฉพาะคำสั่ง SQL เท่านั้น ห้ามอธิบาย ห้ามใส่ ```sql นำหน้าหรือตามหลัง
-""")
-    
-    sql_chain = sql_prompt | llm
-    
-    print("[SQL_Agent] 🧠 กำลังวิเคราะห์และเขียนคำสั่ง SQL...")
-    
-    try:
-        sql_query_response = sql_chain.invoke({"schema": schema, "query": query})
-        raw_sql = sql_query_response.content
-        print(f"[SQL_Agent] 💻 ผลลัพธ์ดิบจาก AI: \n{raw_sql}")
-        
-        # ใช้งานกระบวนการสกัดและตรวจสอบที่เขียนใหม่
-        safe_sql = clean_and_validate_sql(raw_sql)
-        print(f"[SQL_Agent] ✅ คำสั่ง SQL ที่ผ่านการตรวจสอบแล้ว: \n{safe_sql}")
-        
-    except ValueError as ve:
-        if str(ve) == "INVALID_SQL_TYPE":
-            print("[SQL_Agent] ⚠️ ตรวจพบคำสั่งที่ไม่ใช่ SELECT หรือมีความเสี่ยง")
-            return "ขออภัยครับ เพื่อความปลอดภัย ระบบอนุญาตให้สร้างคำสั่งค้นหาข้อมูล (SELECT) เท่านั้น"
-        return "ขออภัยครับ ไม่สามารถตีความคำสั่งที่สร้างขึ้นได้"
-    except Exception as e:
-        print(f"[SQL_Agent] ❌ เกิดข้อผิดพลาดในขั้นตอนสร้าง SQL: {e}")
-        return "ขออภัยครับ ระบบสร้างคำสั่งค้นหาข้อมูลล้มเหลว"
-    
-    conn = None
-    try:
-        conn = get_db_connection()
-        # dictionary=True เพื่อให้อ่านข้อมูลง่ายเมื่อส่งไปให้ LLM สรุป
-        cursor = conn.cursor(dictionary=True) 
-        
-        # MySQL Connector มีระบบป้องกัน Multi-Statements โดยค่าเริ่มต้น
-        # หากมีใครพยายามต่อท้ายด้วย ; DROP TABLE ... ตัว Connector จะโยน Error ให้ทันที
-        cursor.execute(safe_sql)
-        results = cursor.fetchall()
-        
-        print(f"[SQL_Agent] 📊 รัน SQL สำเร็จ ได้ผลลัพธ์มา {len(results)} รายการ")
-        
-        if not results:
-            return "ไม่พบข้อมูลที่ตรงกับคำถามของคุณในฐานข้อมูลครับ"
-            
-        answer_prompt = PromptTemplate.from_template("""คุณคือผู้ช่วย AI ที่ชาญฉลาดและตอบคำถามได้อย่างเป็นธรรมชาติ
-คำถามจากผู้ใช้: "{query}"
-ข้อมูลที่ดึงมาจากฐานข้อมูลเพื่อตอบคำถาม:
-{results}
+    # 4. Generate SQL
+    sql_prompt = PromptTemplate.from_template(
+        "คุณคือ Data Analyst ผู้เชี่ยวชาญ MySQL สำหรับระบบบริหารโครงการมหาวิทยาลัย\n\n"
+        "โครงสร้างตารางที่เกี่ยวข้อง:\n{schema}\n"
+        "{relationships}\n"
+        "{examples}\n"
+        "=== กฎสำคัญ ===\n"
+        "1. ปีโครงการ: JOIN project_template_years pty ON pty.id = p.project_template_year_id, WHERE pty.year = [ปี พ.ศ.]\n"
+        "2. ถ้าต้องการชื่อ ต้อง JOIN ตารางที่เกี่ยวข้อง (departments, statuses, plans, strategics ฯลฯ)\n"
+        "3. ใช้ค่าปีในคำถามโดยตรง ห้ามแปลงค่าปี\n"
+        "4. ถ้าถามเกี่ยวกับหน่วยงาน/แผนก ให้ query จาก departments table โดยตรง\n"
+        "5. กรองชื่อหน่วยงาน: ใช้ WHERE d.name LIKE '%ชื่อ%' ห้ามใส่ชื่อหน่วยงานใน project_template_years\n"
+        "6. เลือก SELECT เฉพาะคอลัมน์ที่มีอยู่จริงตาม Schema ด้านบน\n"
+        "================\n\n"
+        "คำถาม: \"{query}\"\n\n"
+        "เขียนคำสั่ง SELECT ที่ถูกต้องและเรียบง่ายที่สุด\n"
+        "ข้อบังคับ: SELECT เท่านั้น ตอบเป็น SQL ล้วนๆ ไม่ต้องอธิบาย"
+    )
 
-จงสรุปและตอบคำถามผู้ใช้ด้วยภาษาไทยที่อ่านง่าย อ้างอิงจากข้อมูลด้านบนเท่านั้น
-หากข้อมูลมีหลายรายการ ให้สรุปเป็นข้อๆ หรือภาพรวมให้เข้าใจง่าย
-""")
-        answer_chain = answer_prompt | llm
-        
-        print("[SQL_Agent] 🗣️ กำลังสรุปข้อมูลเป็นภาษาคน...")
-        final_response = answer_chain.invoke({
-            "query": query, 
-            "results": str(results[:50]) # ตัดแค่ 50 รายการ ป้องกัน Context Window (Token) ล้น
-        })
-        
-        return final_response.content.strip()
-        
-    except mysql.connector.Error as err:
-        # 5. แยกแยะ Error Code และคืนข้อความที่มีประโยชน์เฉพาะจุด
-        print(f"[SQL_Agent] ❌ MySQL Error [{err.errno}]: {err.msg}")
-        
-        if err.errno == 1146:
-            return "ขออภัยครับ ระบบ AI อ้างอิงตารางที่ไม่มีอยู่จริง (รหัส 1146)"
-        elif err.errno == 1054:
-            return "ขออภัยครับ ระบบ AI อ้างอิงชื่อคอลัมน์ที่ไม่ถูกต้อง (รหัส 1054)"
-        elif err.errno == 1064:
-            return "ขออภัยครับ คำสั่ง SQL ที่ AI สร้างขึ้นมีข้อผิดพลาดทางไวยากรณ์ (รหัส 1064)"
-        elif err.errno in (1044, 1045):
-            return "ขออภัยครับ เกิดปัญหาการยืนยันสิทธิ์ในการเข้าถึงฐานข้อมูล"
-        else:
-            return f"ขออภัยครับ เกิดข้อผิดพลาดจากฐานข้อมูล (รหัสข้อผิดพลาด: {err.errno})"
-            
-    except Exception as e:
-        print(f"[SQL_Agent] ❌ System Error:")
-        traceback.print_exc() # พิมพ์ Stack Trace เชิงลึกให้ Developer
+    print("[SQL_Agent] กำลังสร้าง SQL...")
+    sql_response = (sql_prompt | llm).invoke({
+        "schema": schema,
+        "relationships": _TABLE_RELATIONSHIPS,
+        "examples": _SQL_EXAMPLES,
+        "query": normalized_query,
+    })
+    raw_sql = sql_response.content.strip()
+
+    # Clean markdown fences
+    code_match = re.search(r'```(?:sql)?\s*(.*?)\s*```', raw_sql, re.DOTALL | re.IGNORECASE)
+    if code_match:
+        raw_sql = code_match.group(1).strip()
+    else:
+        raw_sql = raw_sql.replace("```sql", "").replace("```", "").strip()
+
+    select_match = re.search(r'(?i)\bSELECT\b[\s\S]*', raw_sql)
+    if not select_match:
+        return "ขออภัยครับ ระบบไม่สามารถสร้างคำสั่ง SQL ได้"
+    raw_sql = select_match.group(0).strip()
+
+    # Fix CE years that LLM may have written
+    raw_sql = _fix_sql_years(raw_sql)
+
+    # Safety: allow SELECT only
+    if re.search(r'\b(DROP|DELETE|UPDATE|INSERT)\b', raw_sql, re.IGNORECASE):
+        return "ขออภัยครับ คำสั่ง SQL นี้มีความเสี่ยงด้านความปลอดภัย ระบบไม่อนุญาต"
+
+    print(f"[SQL_Agent] SQL: {raw_sql}")
+
+    # 5. Execute with auto-retry on column/table errors
+    results = None
+    last_error = None
+
+    for attempt in range(2):
+        try:
+            results = _run_sql(raw_sql)
+            break
+        except mysql.connector.Error as err:
+            last_error = err
+            print(f"[SQL_Agent] MySQL Error [{err.errno}] attempt {attempt + 1}: {err.msg}")
+            if attempt == 0 and err.errno in (1054, 1064, 1146):
+                raw_sql = _build_fallback_sql(query)
+                raw_sql = _fix_sql_years(raw_sql)
+                print(f"[SQL_Agent] Retrying with fallback SQL: {raw_sql}")
+            else:
+                break
+        except Exception as e:
+            last_error = e
+            print(f"[SQL_Agent] Error: {e}")
+            break
+
+    if results is None:
+        if hasattr(last_error, 'errno'):
+            if last_error.errno == 1146:
+                return "ขออภัยครับ ระบบ AI อ้างอิงตารางที่ไม่มีอยู่จริง"
+            elif last_error.errno == 1054:
+                return "ขออภัยครับ ระบบ AI อ้างอิงชื่อคอลัมน์ที่ไม่ถูกต้อง"
+            elif last_error.errno == 1064:
+                return "ขออภัยครับ คำสั่ง SQL มีข้อผิดพลาดทางไวยากรณ์"
         return "ขออภัยครับ ระบบประมวลผลข้อมูลล้มเหลว"
-    finally:
-        if conn and conn.is_connected():
-            cursor.close()
-            conn.close()
+
+    print(f"[SQL_Agent] ได้ผลลัพธ์ {len(results)} รายการ")
+
+    if not results:
+        return "ไม่พบข้อมูลที่ตรงกับคำถามของคุณในฐานข้อมูลครับ"
+
+    # 6. Summarize in Thai
+    answer_prompt = PromptTemplate.from_template(
+        "คุณคือผู้ช่วย AI ตอบคำถามเป็นภาษาไทยอย่างเป็นธรรมชาติ\n"
+        "คำถาม: \"{query}\"\n"
+        "ข้อมูลจากฐานข้อมูล ({count} รายการ):\n{results}\n\n"
+        "จงสรุปและตอบคำถามผู้ใช้ด้วยภาษาไทยที่อ่านง่าย\n"
+        "ใช้ข้อมูลที่ได้รับเท่านั้น ห้ามสร้างข้อมูลขึ้นมาเอง\n"
+        "หากมีหลายรายการให้แสดงเป็น bullet points\n"
+        "ห้ามแสดง raw JSON ห้ามใช้ Tag [SHOW_TABLE:...] ใดๆ"
+    )
+
+    print("[SQL_Agent] กำลังสรุปข้อมูล...")
+    response = (answer_prompt | llm).invoke({
+        "query": query,
+        "count": len(results),
+        "results": str(results[:50]),
+    })
+    answer = response.content.strip()
+    answer = re.sub(r'\[SHOW_TABLE[^\]]*\]', '', answer).strip()
+
+    # 7. Cache and return
+    _set_cache(query, answer)
+    return answer

@@ -2,47 +2,45 @@ import os
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 
-# โหลดค่าจากไฟล์ .env
 load_dotenv()
 
 class LocalLLMProvider:
+    # Allow model names to be overridden via environment variables
+    _PRIMARY_MODEL = os.getenv("LLM_PRIMARY_MODEL", "scb10x/llama3.1-typhoon2-8b-instruct:latest")
+    _FALLBACK_MODEL = os.getenv("LLM_FALLBACK_MODEL", "llama3:latest")
+
     @staticmethod
     def get_primary_llm(temperature: float = 0.1):
         """
-        เชื่อมต่อ LLM ผ่าน OpenAI-Compatible API ของ Open WebUI
-        Temperature ต่ำ (0.1) ตามกฎ Anti-Hallucination
+        LLM หลักสำหรับงานทั่วไป (RAG, SQL generation, summarization)
+        Temperature ต่ำเพื่อลด Hallucination
         """
         return ChatOpenAI(
             api_key=os.getenv("OPEN_WEBUI_API_KEY"),
             base_url=os.getenv("OPEN_WEBUI_BASE_URL"),
-            model="scb10x/llama3.1-typhoon2-8b-instruct:latest", # ต้องระบุชื่อให้ตรงกับใน Ollama/Open WebUI
+            model=LocalLLMProvider._PRIMARY_MODEL,
             temperature=temperature,
             max_tokens=1024,
-            model_kwargs={"top_p": 0.9}
         )
 
     @staticmethod
     def get_fallback_llm(temperature: float = 0.1):
-        """
-        โมเดลสำรอง: สำหรับงานง่ายๆ เช่น สรุปผล (Summarization) หรือตกแต่งประโยค
-        """
+        """LLM สำรองสำหรับงานเบา เช่น สรุปผลสั้น หรือ format ข้อความ"""
         return ChatOpenAI(
             api_key=os.getenv("OPEN_WEBUI_API_KEY"),
             base_url=os.getenv("OPEN_WEBUI_BASE_URL"),
-            model="llama3:latest", 
+            model=LocalLLMProvider._FALLBACK_MODEL,
             temperature=temperature,
             max_tokens=512,
         )
 
     @staticmethod
     def get_router_llm():
-        """
-        โมเดลสำหรับ Router (แยกแยะ Intent) แนะนำให้ใช้ตัวที่เล็กและเร็วที่สุด หรือ Qwen อุณหภูมิ 0
-        """
+        """LLM สำหรับ Query Router — ต้องการแค่คำตอบสั้น ('sql' หรือ 'rag')"""
         return ChatOpenAI(
             api_key=os.getenv("OPEN_WEBUI_API_KEY"),
             base_url=os.getenv("OPEN_WEBUI_BASE_URL"),
-            model="scb10x/llama3.1-typhoon2-8b-instruct:latest", 
+            model=LocalLLMProvider._PRIMARY_MODEL,
             temperature=0.0,
-            model_kwargs={"response_format": {"type": "json_object"}} # บังคับให้ตอบเป็น JSON
+            max_tokens=10,
         )

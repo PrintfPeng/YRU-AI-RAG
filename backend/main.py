@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Literal, Dict, Any
 from pathlib import Path
+import asyncio
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from pydantic import BaseModel
 from .services.logger import append_log, read_logs
 from .services.rag import answer_question
 from .services.vector_store import reset_vector_store_cache
+from .services.query_router import route_query
+from .services.sql_agent import generate_and_run_sql
 
 # -----------------------------------------------------------
 # กำหนด Path สำหรับเก็บข้อมูลระบบ
@@ -118,14 +121,29 @@ async def ask(req: AskRequest):
             else:
                 sanitized_doc_ids.append(_normalize_id(did))
 
-    # 2. เรียกใช้บริการ RAG Service เพื่อค้นหาข้อมูลและสร้างคำตอบ
-    result = await answer_question(
-        query=req.query,
-        doc_ids=sanitized_doc_ids,
-        top_k=req.top_k,
-        mode=req.mode,
-    )
-    
+    # 2. ตัดสินใจเส้นทาง: SQL Agent หรือ RAG Pipeline
+    route = await asyncio.to_thread(route_query, req.query)
+    print(f"🔀 [API] Query routed to: [{route.upper()}]", flush=True)
+
+    if route == "sql":
+        # เส้นทาง SQL: ดึงข้อมูลโครงสร้างจาก MySQL Database โดยตรง
+        sql_answer = await asyncio.to_thread(generate_and_run_sql, req.query)
+        result = {
+            "answer": sql_answer,
+            "sources": [],
+            "intent": "sql",
+            "mode": "sql",
+            "tables": [],
+        }
+    else:
+        # เส้นทาง RAG: ค้นหาจาก Vector Store (เอกสาร PDF / ข้อมูลเชิงบรรยาย)
+        result = await answer_question(
+            query=req.query,
+            doc_ids=sanitized_doc_ids,
+            top_k=req.top_k,
+            mode=req.mode,
+        )
+
     # บันทึก Log เมื่อระบบสร้างคำตอบเสร็จสิ้น
     print(f"✅ [API] AI ประมวลผลคำตอบเสร็จสิ้น! กำลังเตรียมข้อมูลสำหรับแสดงผล...", flush=True)
 
@@ -176,6 +194,9 @@ async def ask(req: AskRequest):
             answer_text = answer_text.replace(tag_str, replacement_html)
         else:
             answer_text = answer_text.replace(tag_str, "")
+
+    # ลบ tag [SHOW_TABLE:TBL_xxx] ที่ยังค้างอยู่ (hallucinated tags จาก LLM ที่ไม่ถูก resolve)
+    answer_text = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", answer_text).strip()
 
     result["answer"] = answer_text
 
