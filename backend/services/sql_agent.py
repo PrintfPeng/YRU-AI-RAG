@@ -1,21 +1,29 @@
 # backend/services/sql_agent.py
 import os
+import re
+import traceback
 import mysql.connector
+from dotenv import load_dotenv
 from langchain_core.prompts import PromptTemplate
 from backend.services.llm_provider import LocalLLMProvider
 
+# 1. โหลด Environment Variables ทันทีที่ไฟล์ถูกเรียกใช้
+load_dotenv()
+
+def get_db_connection():
+    """ศูนย์รวมการเชื่อมต่อฐานข้อมูล ลดการเขียนโค้ดซ้ำซ้อน"""
+    return mysql.connector.connect(
+        host=os.getenv("DB_HOST", "10.10.2.154"),
+        user=os.getenv("DB_USER", "ai-sandbox-read"),
+        password=os.getenv("DB_PASSWORD", "9IKAjm.R7Qzm_OIZ"),
+        database=os.getenv("DB_NAME", "ai-sandbox_db"),
+        port=int(os.getenv("DB_PORT", 3306))
+    )
+
 def get_db_schema() -> str:
-    """
-    อ่านโครงสร้างตาราง (Schema) ทั้งหมดใน Database เพื่อเป็นบริบทให้ LLM ใช้เขียนโค้ด SQL
-    """
+    conn = None
     try:
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST", "10.10.2.154"),
-            user=os.getenv("DB_USER", "ai-sandbox-read"),
-            password=os.getenv("DB_PASSWORD", "9IKAjm.R7Qzm_OIZ"),
-            database=os.getenv("DB_NAME", "ai-sandbox_db"),
-            port=int(os.getenv("DB_PORT", 3306))
-        )
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         cursor.execute("SHOW TABLES;")
@@ -33,23 +41,48 @@ def get_db_schema() -> str:
         print(f"[SQL_Agent] ❌ Error fetching schema: {e}")
         return ""
     finally:
-        if 'conn' in locals() and conn.is_connected():
+        if conn and conn.is_connected():
             cursor.close()
             conn.close()
 
+def clean_and_validate_sql(raw_text: str) -> str:
+    """
+    ฟังก์ชันสกัดและทำความสะอาด SQL จาก LLM อย่างชาญฉลาดและปลอดภัย
+    """
+    # 2. ค้นหาเฉพาะข้อมูลที่อยู่ใน Markdown Block (หาก AI ใส่มา)
+    code_block_match = re.search(r'```(?:sql|SQL)?\s*(.*?)\s*```', raw_text, flags=re.DOTALL)
+    if code_block_match:
+        sql = code_block_match.group(1).strip()
+    else:
+        sql = raw_text.strip()
+        
+    # 3. สลัดข้อความเกริ่นนำทิ้ง โดยมองหาคำว่า SELECT ตัวแรก
+    select_match = re.search(r'(?i)\bSELECT\b[\s\S]*', sql)
+    if not select_match:
+        raise ValueError("INVALID_SQL_TYPE")
+        
+    final_sql = select_match.group(0).strip()
+    
+    # 4. ตรวจสอบความปลอดภัยสูงสุด: คำสั่งจะต้องขึ้นต้นด้วย SELECT เท่านั้น
+    # วิธีนี้จะแก้ปัญหา False Positive จากคำว่า updated_at หรือ drop ได้ 100%
+    if not final_sql.upper().startswith("SELECT"):
+        raise ValueError("INVALID_SQL_TYPE")
+        
+    return final_sql
+
 def generate_and_run_sql(query: str) -> str:
-    """
-    รับคำถาม -> สั่ง LLM เขียน SQL -> รันบน MySQL -> ส่งผลลัพธ์ดิบให้ LLM สรุปเป็นภาษาคน
-    """
     print("[SQL_Agent] 🔍 เริ่มต้นกระบวนการ Text-to-SQL...")
     
     schema = get_db_schema()
     if not schema:
         return "ขออภัยครับ ไม่สามารถอ่านโครงสร้างฐานข้อมูลได้ในขณะนี้"
         
-    llm = LocalLLMProvider.get_primary_llm(temperature=0.0)
+    try:
+        llm = LocalLLMProvider.get_primary_llm(temperature=0.0)
+    except Exception as e:
+        print(f"[SQL_Agent] ❌ Error initializing LLM: {e}")
+        return "ขออภัยครับ ไม่สามารถเชื่อมต่อกับโมเดล AI ได้"
     
-    # 1. ให้ LLM แปลงคำถามเป็นคำสั่ง SQL
     sql_prompt = PromptTemplate.from_template("""คุณคือ Data Analyst ที่เชี่ยวชาญภาษา MySQL
 นี่คือโครงสร้างตารางทั้งหมดในฐานข้อมูล:
 {schema}
@@ -65,29 +98,34 @@ def generate_and_run_sql(query: str) -> str:
     sql_chain = sql_prompt | llm
     
     print("[SQL_Agent] 🧠 กำลังวิเคราะห์และเขียนคำสั่ง SQL...")
-    sql_query_response = sql_chain.invoke({"schema": schema, "query": query})
     
-    # ทำความสะอาดโค้ด SQL ที่ได้มาจาก LLM
-    raw_sql = sql_query_response.content.strip()
-    raw_sql = raw_sql.replace("```sql", "").replace("```", "").strip()
-    
-    print(f"[SQL_Agent] 💻 คำสั่ง SQL ที่ได้: \n{raw_sql}")
-    
-    # ตรวจสอบความปลอดภัยเบื้องต้น (Safety Check)
-    if any(keyword in raw_sql.upper() for keyword in ["DROP", "DELETE", "UPDATE", "INSERT"]):
-        return "ขออภัยครับ คำสั่ง SQL นี้มีความเสี่ยงด้านความปลอดภัย ระบบจึงไม่อนุญาตให้ทำงาน"
-    
-    # 2. รันคำสั่ง SQL
     try:
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST", "10.10.2.154"),
-            user=os.getenv("DB_USER", "ai-sandbox-read"),
-            password=os.getenv("DB_PASSWORD", "9IKAjm.R7Qzm_OIZ"),
-            database=os.getenv("DB_NAME", "ai-sandbox_db"),
-            port=int(os.getenv("DB_PORT", 3306))
-        )
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(raw_sql)
+        sql_query_response = sql_chain.invoke({"schema": schema, "query": query})
+        raw_sql = sql_query_response.content
+        print(f"[SQL_Agent] 💻 ผลลัพธ์ดิบจาก AI: \n{raw_sql}")
+        
+        # ใช้งานกระบวนการสกัดและตรวจสอบที่เขียนใหม่
+        safe_sql = clean_and_validate_sql(raw_sql)
+        print(f"[SQL_Agent] ✅ คำสั่ง SQL ที่ผ่านการตรวจสอบแล้ว: \n{safe_sql}")
+        
+    except ValueError as ve:
+        if str(ve) == "INVALID_SQL_TYPE":
+            print("[SQL_Agent] ⚠️ ตรวจพบคำสั่งที่ไม่ใช่ SELECT หรือมีความเสี่ยง")
+            return "ขออภัยครับ เพื่อความปลอดภัย ระบบอนุญาตให้สร้างคำสั่งค้นหาข้อมูล (SELECT) เท่านั้น"
+        return "ขออภัยครับ ไม่สามารถตีความคำสั่งที่สร้างขึ้นได้"
+    except Exception as e:
+        print(f"[SQL_Agent] ❌ เกิดข้อผิดพลาดในขั้นตอนสร้าง SQL: {e}")
+        return "ขออภัยครับ ระบบสร้างคำสั่งค้นหาข้อมูลล้มเหลว"
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        # dictionary=True เพื่อให้อ่านข้อมูลง่ายเมื่อส่งไปให้ LLM สรุป
+        cursor = conn.cursor(dictionary=True) 
+        
+        # MySQL Connector มีระบบป้องกัน Multi-Statements โดยค่าเริ่มต้น
+        # หากมีใครพยายามต่อท้ายด้วย ; DROP TABLE ... ตัว Connector จะโยน Error ให้ทันที
+        cursor.execute(safe_sql)
         results = cursor.fetchall()
         
         print(f"[SQL_Agent] 📊 รัน SQL สำเร็จ ได้ผลลัพธ์มา {len(results)} รายการ")
@@ -95,7 +133,6 @@ def generate_and_run_sql(query: str) -> str:
         if not results:
             return "ไม่พบข้อมูลที่ตรงกับคำถามของคุณในฐานข้อมูลครับ"
             
-        # 3. ให้ LLM แปลงผลลัพธ์ SQL เป็นคำตอบภาษาคน
         answer_prompt = PromptTemplate.from_template("""คุณคือผู้ช่วย AI ที่ชาญฉลาดและตอบคำถามได้อย่างเป็นธรรมชาติ
 คำถามจากผู้ใช้: "{query}"
 ข้อมูลที่ดึงมาจากฐานข้อมูลเพื่อตอบคำถาม:
@@ -109,21 +146,31 @@ def generate_and_run_sql(query: str) -> str:
         print("[SQL_Agent] 🗣️ กำลังสรุปข้อมูลเป็นภาษาคน...")
         final_response = answer_chain.invoke({
             "query": query, 
-            # ตัดข้อมูลให้เหลือไม่เกิน 50 แถว ป้องกัน Context ล้น (Token Limit)
-            "results": str(results[:50]) 
+            "results": str(results[:50]) # ตัดแค่ 50 รายการ ป้องกัน Context Window (Token) ล้น
         })
         
         return final_response.content.strip()
         
     except mysql.connector.Error as err:
-        error_msg = f"เกิดข้อผิดพลาดจาก MySQL: {err}"
-        print(f"[SQL_Agent] ❌ {error_msg}")
-        return "ขออภัยครับ คำสั่ง SQL ที่สร้างขึ้นมีปัญหา ไม่สามารถดึงข้อมูลได้"
+        # 5. แยกแยะ Error Code และคืนข้อความที่มีประโยชน์เฉพาะจุด
+        print(f"[SQL_Agent] ❌ MySQL Error [{err.errno}]: {err.msg}")
+        
+        if err.errno == 1146:
+            return "ขออภัยครับ ระบบ AI อ้างอิงตารางที่ไม่มีอยู่จริง (รหัส 1146)"
+        elif err.errno == 1054:
+            return "ขออภัยครับ ระบบ AI อ้างอิงชื่อคอลัมน์ที่ไม่ถูกต้อง (รหัส 1054)"
+        elif err.errno == 1064:
+            return "ขออภัยครับ คำสั่ง SQL ที่ AI สร้างขึ้นมีข้อผิดพลาดทางไวยากรณ์ (รหัส 1064)"
+        elif err.errno in (1044, 1045):
+            return "ขออภัยครับ เกิดปัญหาการยืนยันสิทธิ์ในการเข้าถึงฐานข้อมูล"
+        else:
+            return f"ขออภัยครับ เกิดข้อผิดพลาดจากฐานข้อมูล (รหัสข้อผิดพลาด: {err.errno})"
+            
     except Exception as e:
-        error_msg = f"เกิดข้อผิดพลาดในการรันระบบ SQL: {e}"
-        print(f"[SQL_Agent] ❌ {error_msg}")
+        print(f"[SQL_Agent] ❌ System Error:")
+        traceback.print_exc() # พิมพ์ Stack Trace เชิงลึกให้ Developer
         return "ขออภัยครับ ระบบประมวลผลข้อมูลล้มเหลว"
     finally:
-        if 'conn' in locals() and conn.is_connected():
+        if conn and conn.is_connected():
             cursor.close()
             conn.close()

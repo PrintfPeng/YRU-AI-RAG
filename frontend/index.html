@@ -208,6 +208,14 @@
       text-align: left;
     }
     .bubble table th { background: var(--bg3); color: var(--accent2); }
+    .table-responsive {
+      overflow-x: auto;
+      width: 100%;
+      margin: 8px 0;
+    }
+    .table-responsive table {
+      min-width: 500px;
+    }
 
     .msg-meta {
       font-size: 11px;
@@ -496,12 +504,105 @@
 
   function formatAnswer(text) {
     if (!text) return '(ไม่มีคำตอบ)';
-    // Markdown-lite
-    return text
-      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-      .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-      .replace(/\*(.+?)\*/g,'<em>$1</em>')
-      .replace(/\n/g,'<br>');
+    
+    // 1. Temporary protect backend-generated HTML tags
+    const placeholders = [];
+    text = text.replace(/(<div[^>]*>|<\/div>|<table[^>]*>|<\/table>|<thead[^>]*>|<\/thead>|<tbody[^>]*>|<\/tbody>|<tr[^>]*>|<\/tr>|<td[^>]*>|<\/td>|<th[^>]*>|<\/th>|<img[^>]*>|<br\s*\/?>)/gi, (match) => {
+      placeholders.push(match);
+      return `___HTML_PLACEHOLDER_${placeholders.length - 1}___`;
+    });
+
+    // 2. Escape standard HTML
+    text = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    // 3. Parse Markdown Tables (before converting \n to <br>)
+    const lines = text.split('\n');
+    const newLines = [];
+    let inTable = false;
+    let tableRows = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      const isRow = line.startsWith('|') && line.endsWith('|');
+      
+      if (isRow) {
+        if (!inTable) {
+          inTable = true;
+          tableRows = [];
+        }
+        tableRows.push(line);
+      } else {
+        if (inTable) {
+          const htmlTable = renderMarkdownTable(tableRows);
+          newLines.push(htmlTable);
+          inTable = false;
+          tableRows = [];
+        }
+        newLines.push(lines[i]);
+      }
+    }
+    if (inTable && tableRows.length > 0) {
+      const htmlTable = renderMarkdownTable(tableRows);
+      newLines.push(htmlTable);
+    }
+
+    text = newLines.join('\n');
+
+    // 4. Parse Bold, Italic, and Newlines
+    text = text
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g, '<em>$1</em>')
+      .replace(/\n/g, '<br>');
+
+    // 5. Restore protected HTML tags
+    text = text.replace(/___HTML_PLACEHOLDER_(\d+)___/g, (match, index) => {
+      return placeholders[parseInt(index, 10)];
+    });
+
+    return text;
+  }
+
+  function renderMarkdownTable(rows) {
+    if (rows.length < 2) {
+      return rows.join('\n');
+    }
+    
+    const separatorRow = rows[1];
+    const isSeparator = /^\|[\s\-\|:]+\|$/.test(separatorRow);
+    if (!isSeparator) {
+      return rows.join('\n');
+    }
+
+    let html = '<div class="table-responsive"><table>';
+    
+    // Header
+    const headerCols = rows[0].split('|').map(c => c.trim()).filter((c, idx, arr) => idx > 0 && idx < arr.length - 1);
+    html += '<thead><tr>';
+    headerCols.forEach(col => {
+      html += `<th>${col}</th>`;
+    });
+    html += '</tr></thead><tbody>';
+
+    // Body
+    for (let i = 2; i < rows.length; i++) {
+      const cols = rows[i].split('|').map(c => c.trim()).filter((c, idx, arr) => idx > 0 && idx < arr.length - 1);
+      html += '<tr>';
+      cols.forEach(col => {
+        html += `<td>${col}</td>`;
+      });
+      if (cols.length < headerCols.length) {
+        for (let j = cols.length; j < headerCols.length; j++) {
+          html += '<td></td>';
+        }
+      }
+      html += '</tr>';
+    }
+    
+    html += '</tbody></table></div>';
+    return html;
   }
 
   function escapeHtml(str) {
