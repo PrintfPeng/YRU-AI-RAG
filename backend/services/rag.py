@@ -812,7 +812,8 @@ async def answer_question(
             content = getattr(d, "page_content", "") or ""
             content = content.replace("\x00", "")
             
-            chunk_header = f"[SOURCE {i}] ID: {doc_id} | Page: {page}"
+            # [FIX] ระบุ source type ใน header ให้ LLM เห็นชัดเจน เพื่อให้ตอบกลับถูกต้อง
+            chunk_header = f"[SOURCE {i}] ID: {doc_id} | Type: {source.upper()} | Page: {page}"
 
             if source == "table":
                 table_counter += 1
