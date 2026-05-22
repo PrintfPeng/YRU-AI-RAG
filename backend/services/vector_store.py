@@ -339,7 +339,7 @@ def search_similar(
         if not use_native_filter:
             logger.info(f"[vector_store] Using PYTHON filter for: doc_ids={sanitized_doc_ids}, sources={sources}, doc_types={doc_types}")
             
-            fetch_size = max(k * 10, 50) 
+            fetch_size = max(k * 20, 200)  # [FIX] เพิ่ม fetch size เพื่อดึงข้อมูลให้มากพอก่อน filter
             raw_docs = vectordb.similarity_search(query, k=fetch_size)
             
             logger.info(f"[vector_store] Fetched {len(raw_docs)} raw documents for Python filtering")

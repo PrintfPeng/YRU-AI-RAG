@@ -90,7 +90,7 @@ async def health_check():
 class AskRequest(BaseModel):
     query: str
     doc_ids: Optional[List[str]] = None
-    top_k: int = 5
+    top_k: int = 20
     mode: Literal["auto", "text", "table", "both"] = "auto"
 
 class AskResponse(BaseModel):

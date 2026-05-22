@@ -279,13 +279,15 @@ def _filter_relevant_docs(query: str, docs: list, min_score: float = MIN_SCORE_T
         # หากไม่มี CrossEncoder → ai_score จะมาจาก keyword scoring (fallback)
         # ดังนั้นให้ผ่อนปรน keyword guard ลง เพื่อไม่ block เอกสารที่ vector search เจอมาแล้ว
         source_type = d.metadata.get("source", "text")
-        if not _HAS_RERANKER and source_type != "mysql":
+        # [FIX] รองรับ source ที่มีคำว่า 'mysql' เป็นส่วนหนึ่ง เช่น 'mysql_planning'
+        is_mysql_source = "mysql" in str(source_type).lower()
+        if not _HAS_RERANKER and not is_mysql_source:
             # ไม่มี CrossEncoder → เชื่อ vector similarity + keyword fallback score
             # Block เฉพาะกรณีที่ score ต่ำมาก (< 0.05) และ content สั้นเกินไป (< 20 ตัว)
             if score < 0.05 and len(content.strip()) < 20:
                 logger.debug(f"[filter] BLOCKED (no reranker, low score + short content): {content[:40]}")
                 continue
-        elif source_type != "mysql" and len(query) > 15:
+        elif not is_mysql_source and len(query) > 15:
             # มี CrossEncoder → ใช้ keyword guard ปกติ แต่ปรับ threshold ให้ผ่อนปรนขึ้น
             overlap = _keyword_overlap_count(query, content)
             if overlap < MIN_KEYWORD_OVERLAP and score < 0.15:
@@ -408,8 +410,8 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
         is_img_q = any(x in query_lower for x in ["รูปภาพ", "image", "logo", "กราฟ", "แผนภูมิ", "ถ่ายรูป"])
         is_tbl_q = any(x in query_lower for x in ["ตาราง", "table", "แบบฟอร์ม", "สถิติ"])
         
-        # mysql source ไม่ถูก penalty เพราะเป็นข้อมูลหลักของระบบ
-        if source_type == "mysql":
+        # [FIX] mysql และ mysql_planning source ไม่ถูก penalty เพราะเป็นข้อมูลหลักของระบบ
+        if "mysql" in source_type:
             pass  # ไม่ลดคะแนน
         elif is_img_q:
             if source_type != "image":
@@ -451,7 +453,9 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
                     # บังคับใช้กฎ Intent Penalty กับคะแนน AI เช่นเดียวกัน
                     source_type = str(scored_docs[idx].metadata.get("source", "text")).lower()
                     
-                    if is_img_q:
+                    if "mysql" in source_type:
+                        pass  # [FIX] mysql/mysql_planning ไม่ถูก penalty
+                    elif is_img_q:
                         if source_type != "image":
                             norm_score *= 0.1
                     elif is_tbl_q:
@@ -684,7 +688,7 @@ async def _rewrite_query(query: str, history: list[dict], llm) -> str:
 async def answer_question(
     query: str,
     doc_ids: Optional[List[str]] = None,
-    top_k: int = 10,
+    top_k: int = 20,
     mode: str = "auto",
 ) -> Dict:
     
@@ -871,30 +875,27 @@ async def answer_question(
     else:
         # โหมดการทำงาน 2: นักวิเคราะห์ข้อมูลอัจฉริยะแบบผสมผสาน (Smart Analyst)
         system_prompt = (
-            "บทบาท: คุณคือ 'ผู้เชี่ยวชาญด้านเอกสาร' ที่เน้นความถูกต้องของข้อมูลสูงสุด\n"
-            "หน้าที่: ตอบคำถามจาก Context ที่ให้มา โดยเลือกวิธีนำเสนอที่ดีที่สุด\n"
+            "บทบาท: คุณคือผู้เชี่ยวชาญวิเคราะห์ข้อมูลมหาวิทยาลัย ตอบคำถามภาษาไทยอย่างละเอียดและถูกต้อง\n"
             "\n"
-            "🧠 วิธีการนำเสนอข้อมูล:\n"
-            "1. **สำหรับข้อมูลตาราง/แบบฟอร์มที่มีรหัสตาราง [SHOW_TABLE:TBL_x] กำหนดไว้ในหัวข้อ [SOURCE] เท่านั้น:**\n"
-            "   - ให้ใช้ Tag: [SHOW_TABLE:TBL_x] ตามรหัสที่ระบุใน SOURCE เสมอ (ห้ามแก้ไขตัวเลขหรือคำอธิบาย เช่น ห้ามพิมพ์ [SHOW_TABLE:TBL_projects] ขึ้นมาเอง)\n"
-            "   - ห้ามวาดตาราง Markdown |...| เองสำหรับข้อมูลกลุ่มนี้เด็ดขาด\n"
-            "2. **สำหรับข้อมูลทั่วไป หรือข้อมูลจาก MySQL/ฐานข้อมูล (เช่น รายละเอียดโครงการ, งบประมาณ, KPI) ที่ไม่มีรหัสระบุใน SOURCE:**\n"
-            "   - ให้สรุปผลตอบเป็นข้อความ รายการ (bullet points) หรือวาดตารางแบบ Markdown (|...|...|) เพื่อแสดงข้อมูลได้อย่างอิสระเพื่อความชัดเจนและสวยงาม\n"
-            "   - ห้ามใส่ Tag [SHOW_TABLE:...] หรือ Tag อื่นๆ ที่ไม่มีระบุรหัสใน SOURCE ของ Context โดยเด็ดขาด\n"
-            "3. **สำหรับ 'รูปภาพทั่วไป':**\n"
-            "   - ให้มองหาข้อมูล in SOURCE ที่มี 'source': 'image' เท่านั้น\n"
-            "   - ให้ใช้ Tag: [SHOW_IMAGE: images/ชื่อไฟล์.png] โดยต้องก็อปปี้ค่ามาจาก 'image_path' หรือชื่อไฟล์ใน Metadata มาวางให้ตรงเป๊ะ ห้ามเดาชื่อไฟล์หรือเอาเลขหน้ามาต่อกันเองเด็ดขาด!\n"
+            "📌 กฎสำคัญ — ประเภทข้อมูลใน Context:\n"
             "\n"
-            "📋 รูปแบบการตอบ:\n"
-            "1. ตอบคำถามให้ตรงประเด็น\n"
-            "2. แทรก Tag อ้างอิงประกอบเฉพาะตารางที่มีรหัสจริงระบุไว้ หรือรูปภาพที่มีระบุใน Context เท่านั้น\n"
-            "3. **[สำคัญมาก]** ห้ามใส่รูปแบบดิบๆ อย่าง [SOURCE 1, SOURCE 2] และ (อ้างอิงจาก SOURCE 3) ท้ายประโยคเด็ดขาด!\n"
+            "## ประเภทที่ 1: ข้อมูลจาก MySQL (source: mysql_planning)\n"
+            "- เป็นข้อมูลโครงการ งบประมาณ ยุทธศาสตร์ แผนงาน KPI ของมหาวิทยาลัย\n"
+            "- ห้ามใส่ Tag [SHOW_TABLE:...] ใดๆ กับข้อมูลกลุ่มนี้เด็ดขาด\n"
+            "- ให้ตอบเป็นข้อความ / รายการ / หรือ Markdown Table (| คอลัมน์ | คอลัมน์ |) ตามความเหมาะสม\n"
             "\n"
-            "⚠️ กฎเหล็ก:\n"
-            "1. ห้ามวาดตารางเองเฉพาะกรณีของ PDF Table ที่มีรหัสอ้างอิง [SHOW_TABLE:TBL_x] ให้ใช้รหัสนั้นแทน แต่สำหรับข้อมูลประเภทอื่นๆ (เช่น MySQL/ planning) ที่ไม่มีรหัสตาราง ให้แสดงผลข้อมูลเป็นข้อความปกติหรือตาราง Markdown ได้อย่างอิสระตามความเหมาะสม\n"
-            "2. หากผู้ใช้ถามหา 'บุคคล', 'ชื่อคน' หรือ 'ตัวเลขสำคัญ' ให้ตอบตามข้อมูลใน Context เท่านั้น ห้ามเดาหรือแต่งเรื่องเองเด็ดขาด\n"
-            "3. หากค้นหาชื่อบุคคลแล้วไม่พบใน Context ให้ตอบว่า 'ไม่พบข้อมูลที่ระบุชื่อบุคคลนี้'\n"
-            "4. หากขอดูรูป แล้วหารูปไม่เจอ ห้ามเดา Path เอง ให้ตอบว่า 'ไม่พบรูปภาพตามที่ขอ'\n"
+            "## ประเภทที่ 2: ตารางจาก PDF (หัวข้อ SOURCE มีระบุ TYPE: TABLE และรหัส [SHOW_TABLE:TBL_x])\n"
+            "- ให้ใช้รหัส [SHOW_TABLE:TBL_x] ตามที่ระบุในหัวข้อ SOURCE เท่านั้น\n"
+            "- ห้ามสร้างรหัสขึ้นมาเอง เช่น ห้ามพิมพ์ [SHOW_TABLE:TBL_projects]\n"
+            "\n"
+            "## ประเภทที่ 3: รูปภาพ (source: image)\n"
+            "- ให้ใช้ [SHOW_IMAGE: images/ชื่อไฟล์] ตาม image_path ใน SOURCE เท่านั้น\n"
+            "\n"
+            "⚠️ กฎเหล็กเพิ่มเติม:\n"
+            "1. ต้องตอบด้วยข้อมูลจาก CONTEXT เสมอ ห้ามปฏิเสธหรือบอกว่าไม่มีข้อมูลหากมีข้อมูลอยู่ใน CONTEXT\n"
+            "2. ห้ามแต่งข้อมูลเพิ่มเติมหรือคาดเดา ตอบจาก CONTEXT เท่านั้น\n"
+            "3. ห้ามใส่ [SOURCE x] หรือ (อ้างอิงจาก SOURCE x) ท้ายคำตอบ\n"
+            "4. ถ้าข้อมูลมีหลายรายการ ให้แสดงในรูปแบบตาราง Markdown หรือรายการ bullet points\n"
             "\n"
             f"=== DOCUMENT CONTEXT ===\n{context_text}\n========================"
         )
