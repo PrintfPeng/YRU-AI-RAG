@@ -357,6 +357,14 @@ def list_documents():
 # API: ตรวจสอบสถานะและข้อมูลภายใน ChromaDB (Database Dashboard)
 # -----------------------------------------------------------
 from .services.vector_store import get_collection_info, get_vector_store
+import chromadb as _chromadb
+
+def _get_chroma_client():
+    """สร้าง ChromaDB client ตรงๆ เพื่อ browse ทุก collection"""
+    host = os.getenv("CHROMA_SERVER_HOST", "localhost")
+    port = int(os.getenv("CHROMA_SERVER_PORT", "8000"))
+    return _chromadb.HttpClient(host=host, port=port)
+
 
 @app.get("/api/database/stats")
 def get_db_stats():
@@ -373,7 +381,7 @@ def get_db_samples(limit: int = 10):
         vectordb = get_vector_store()
         collection = vectordb._collection
         raw_data = collection.get(limit=limit)
-        
+
         results = []
         if raw_data and raw_data.get('documents'):
             for i in range(len(raw_data['documents'])):
@@ -383,6 +391,118 @@ def get_db_samples(limit: int = 10):
                     "text": raw_data['documents'][i]
                 })
         return {"status": "success", "data": results}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/admin/collections")
+def admin_list_collections():
+    """ดึงรายชื่อ collections ทั้งหมดพร้อมจำนวน documents"""
+    try:
+        client = _get_chroma_client()
+        cols = client.list_collections()
+        result = []
+        for col in cols:
+            c = client.get_collection(col.name)
+            result.append({"name": col.name, "count": c.count()})
+        return {"status": "success", "collections": result}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/admin/browse")
+def admin_browse(
+    collection: str = "yru_planning_data",
+    page: int = 1,
+    limit: int = 20,
+    keyword: str = "",
+    year: str = "",
+    department: str = "",
+    source: str = "",
+):
+    """
+    Browse ข้อมูลใน ChromaDB แบบ paginate + filter
+    - keyword: ค้นหาในเนื้อหา (contains)
+    - year: กรองปี พ.ศ.
+    - department: กรองหน่วยงาน
+    - source: กรอง source (mysql_planning / mysql / pdf ...)
+    """
+    try:
+        client = _get_chroma_client()
+        col = client.get_collection(collection)
+        total = col.count()
+
+        # ดึงข้อมูลทั้งหมดแล้ว filter ใน Python
+        # (ChromaDB HTTP API ยังไม่รองรับ full-text filter โดยตรง)
+        offset = (page - 1) * limit
+        # ดึงมากพอสำหรับ filter (max 2000 ต่อครั้ง)
+        fetch_limit = min(total, 2000)
+        raw = col.get(limit=fetch_limit, offset=0)
+
+        rows = []
+        if raw and raw.get("documents"):
+            for i in range(len(raw["documents"])):
+                doc_text = raw["documents"][i] or ""
+                meta = raw["metadatas"][i] or {}
+
+                # Apply filters
+                if keyword and keyword.lower() not in doc_text.lower():
+                    continue
+                if year and str(meta.get("year", "")) != str(year):
+                    continue
+                if department and department.lower() not in str(meta.get("department", "")).lower():
+                    continue
+                if source and str(meta.get("source", "")) != source:
+                    continue
+
+                rows.append({
+                    "id": raw["ids"][i],
+                    "metadata": meta,
+                    "text": doc_text,
+                })
+
+        filtered_total = len(rows)
+        paginated = rows[offset: offset + limit]
+
+        return {
+            "status": "success",
+            "collection": collection,
+            "total": total,
+            "filtered_total": filtered_total,
+            "page": page,
+            "limit": limit,
+            "total_pages": max(1, -(-filtered_total // limit)),
+            "data": paginated,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/admin/facets")
+def admin_facets(collection: str = "yru_planning_data"):
+    """ดึง distinct values ของ year, department, source สำหรับ filter dropdowns"""
+    try:
+        client = _get_chroma_client()
+        col = client.get_collection(collection)
+        total = col.count()
+        raw = col.get(limit=min(total, 5000))
+
+        years, departments, sources = set(), set(), set()
+        if raw and raw.get("metadatas"):
+            for meta in raw["metadatas"]:
+                if meta.get("year"):
+                    years.add(str(meta["year"]))
+                if meta.get("department"):
+                    departments.add(meta["department"])
+                if meta.get("source"):
+                    sources.add(meta["source"])
+
+        return {
+            "status": "success",
+            "years": sorted(years, reverse=True),
+            "departments": sorted(departments),
+            "sources": sorted(sources),
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
