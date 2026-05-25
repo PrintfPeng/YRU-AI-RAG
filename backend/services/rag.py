@@ -697,6 +697,7 @@ async def answer_question(
         return {"answer": "กรุณาพิมพ์คำถามครับ", "sources": [], "intent": None, "mode": mode}
 
     # 2. เรียกใช้งานระบบจัดการความจำของบทสนทนา
+    user_specified_doc_ids = bool(doc_ids)  # track ว่า user ระบุ doc_ids มาเองหรือไม่
     chat_history, sticky_doc_ids = _get_chat_history(limit=3, current_doc_ids=doc_ids)
 
     # นำส่งเอกสารต่อเนื่องหากผู้ใช้ไม่ได้เปลี่ยนเอกสาร
@@ -745,7 +746,15 @@ async def answer_question(
     try:
         # ดึงข้อมูลแบบเฉพาะเจาะจงเพื่อรักษาขอบเขตเนื้อหา
         raw_docs = search_similar(search_query, k=top_k*3, doc_ids=sanitized_doc_ids, sources=sources_filter, doc_types=doc_types)
-        
+
+        # ── Sticky-context fallback ───────────────────────────────────────────
+        # ถ้า sticky_doc_ids (จาก session PDF เก่า) ทำให้ได้ 0 ผล ให้ลอง global search
+        # MySQL planning docs ไม่มี doc_id ใน metadata → ถูก filter ออกหมดเมื่อ sticky ถูก inject
+        if not raw_docs and sticky_doc_ids and not user_specified_doc_ids:
+            logger.info("[rag] Sticky doc_ids returned 0 results → retrying without doc_id filter (global search)")
+            raw_docs = search_similar(search_query, k=top_k*3, doc_ids=None, sources=None, doc_types=None)
+        # ─────────────────────────────────────────────────────────────────────
+
         if not raw_docs:
             logger.warning(f"[rag] ❌ No documents found in Vector DB for query: '{search_query}'")
             return {
