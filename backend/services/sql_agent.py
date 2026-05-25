@@ -26,6 +26,7 @@ _CORE_TABLES = [
     'tactic_templates',
     'programs',
     'sdg_templates',
+    'project_kpis',   # ตัวชี้วัด KPI ของแต่ละโครงการ (project_id, name, target)
 ]
 
 # Explicit relationship map injected into the SQL prompt
@@ -124,8 +125,32 @@ LIMIT 10;
 SELECT id, sequence AS ลำดับ, name AS ชื่อยุทธศาสตร์ FROM strategics
 WHERE year = 2566 AND deleted_at IS NULL ORDER BY sequence;
 
--- ดูพันธกิจทั้งหมด:
+-- ดูพันธกิจทั้งหมด (missions คือพันธกิจหลักของมหาวิทยาลัย ไม่ใช่ชื่อมหาวิทยาลัย):
 SELECT id, name AS ชื่อพันธกิจ FROM missions WHERE deleted_at IS NULL ORDER BY id;
+
+-- *** หมายเหตุ: missions.name มีค่าเป็น "ผลิตบัณฑิต", "วิจัย", "บริการวิชาการ" ฯลฯ ***
+-- *** ห้ามกรอง missions.name LIKE '%ราชภัฏยะลา%' เพราะจะได้ 0 แถว ***
+-- *** ถ้าถามว่า "พันธกิจมีอะไรบ้าง" ให้ SELECT ทั้งหมดโดยไม่มี WHERE เพิ่มเติม ***
+
+-- ดูโครงการที่มีตัวชี้วัด (KPI) เรื่องความพึงพอใจ:
+SELECT py.name AS ชื่อโครงการ, pk.name AS ตัวชี้วัด, d.name AS หน่วยงาน
+FROM projects p
+JOIN project_template_years py ON py.id = p.project_template_year_id
+JOIN project_kpis pk ON pk.project_id = p.id
+JOIN departments d ON d.id = p.department_id
+WHERE pk.name LIKE '%ความพึงพอใจ%'
+  AND pk.deleted_at IS NULL
+  AND p.deleted_at IS NULL
+ORDER BY d.name
+LIMIT 20;
+
+-- ดูโครงการที่มีตัวชี้วัด (KPI) ตาม keyword:
+SELECT py.name AS ชื่อโครงการ, pk.name AS ตัวชี้วัด
+FROM project_kpis pk
+JOIN projects p ON p.id = pk.project_id
+JOIN project_template_years py ON py.id = p.project_template_year_id
+WHERE pk.name LIKE '%[KEYWORD]%' AND pk.deleted_at IS NULL AND p.deleted_at IS NULL
+LIMIT 20;
 ==============================================
 """
 
