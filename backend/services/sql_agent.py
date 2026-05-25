@@ -35,15 +35,16 @@ _TABLE_RELATIONSHIPS = """
 projects.project_template_year_id → project_template_years.id   → project_template_years.year (ปี พ.ศ.)
 projects.department_id            → departments.id               → departments.name (หน่วยงาน/คณะ/สำนัก)
 projects.plan_id                  → plans.id                     → plans.name (แผนงาน)
-projects.strategic_id             → strategics.id                → strategics.name (ยุทธศาสตร์)
-projects.mission_id               → missions.id                  → missions.name (พันธกิจ)
-projects.output_id                → outputs.id                   → outputs.name (ผลผลิต)
+projects.strategic_id             → strategics.id                → strategics.name (ยุทธศาสตร์) ← กรองชื่อด้วย s.name LIKE '%...%'
+projects.mission_id               → missions.id                  → missions.name (พันธกิจ)     ← กรองชื่อด้วย ms.name LIKE '%...%'
+projects.output_id                → outputs.id                   → outputs.name (ผลผลิต)       ← กรองชื่อด้วย o.name LIKE '%...%'
 projects.tactic_id                → tactic_templates.id          → tactic_templates.name (กลยุทธ์)
 projects.goal_id                  → goals.id → goals.goal_template_id → goal_templates.name (เป้าหมาย)
 -- *** พิเศษ: status_id เป็น VARCHAR slug ไม่ใช่ integer ***
 projects.status_id (varchar)      → statuses.status              → statuses.name (สถานะโครงการ)
--- JOIN ถูกต้อง: JOIN statuses s ON s.status = p.status_id
--- ห้ามใช้:      JOIN statuses s ON s.id = p.status_id  (ผิด!)
+-- JOIN ถูกต้อง: JOIN statuses st ON st.status = p.status_id
+-- ห้ามใช้:      JOIN statuses st ON st.id = p.status_id  (ผิด!)
+-- *** กฎ alias: ถ้า JOIN strategics ใช้ alias "s", ถ้า JOIN statuses ให้ใช้ alias "st" เพื่อไม่ชนกัน ***
 =========================================
 """
 
@@ -79,17 +80,52 @@ WHERE pty.year = 2566 AND p.deleted_at IS NULL
 GROUP BY d.id, d.name ORDER BY งบรวม DESC;
 
 -- ดูโครงการในปี 2566 ของหน่วยงานหนึ่ง (กรองด้วย d.name LIKE ไม่ใช่ project_template_years.name):
-SELECT p.id, d.name AS หน่วยงาน, s.name AS สถานะ, p.principle
+SELECT p.id, d.name AS หน่วยงาน, st.name AS สถานะ, p.principle
 FROM projects p
 JOIN departments d ON d.id = p.department_id
-JOIN statuses s ON s.status = p.status_id
+JOIN statuses st ON st.status = p.status_id
 JOIN project_template_years pty ON pty.id = p.project_template_year_id
 WHERE pty.year = 2566 AND d.name LIKE '%สำนักงานอธิการบดี%' AND p.deleted_at IS NULL
 LIMIT 20;
 
+-- ดูโครงการในปี 2566 ที่อยู่ในยุทธศาสตร์ที่ชื่อมี "คุณภาพการศึกษา":
+SELECT p.id, py.name AS ชื่อโครงการ, d.name AS หน่วยงาน, s.name AS ยุทธศาสตร์
+FROM projects p
+JOIN strategics s ON s.id = p.strategic_id
+JOIN departments d ON d.id = p.department_id
+JOIN project_template_years pty ON pty.id = p.project_template_year_id
+WHERE pty.year = 2566 AND s.name LIKE '%คุณภาพการศึกษา%' AND p.deleted_at IS NULL
+LIMIT 20;
+
+-- ดูโครงการในปี 2566 ที่เกี่ยวกับพันธกิจวิจัย:
+SELECT p.id, py.name AS ชื่อโครงการ, d.name AS หน่วยงาน, ms.name AS พันธกิจ
+FROM projects p
+JOIN missions ms ON ms.id = p.mission_id
+JOIN departments d ON d.id = p.department_id
+JOIN project_template_years pty ON pty.id = p.project_template_year_id
+WHERE pty.year = 2566 AND ms.name LIKE '%วิจัย%' AND p.deleted_at IS NULL
+LIMIT 20;
+
+-- ดูโครงการพร้อม hierarchy ครบ (ยุทธศาสตร์, พันธกิจ, แผนงาน, ผลผลิต, เป้าหมาย):
+SELECT p.id, py.name AS ชื่อโครงการ, d.name AS หน่วยงาน,
+       s.name AS ยุทธศาสตร์, ms.name AS พันธกิจ,
+       pl.name AS แผนงาน, o.name AS ผลผลิต
+FROM projects p
+JOIN departments d ON d.id = p.department_id
+JOIN strategics s ON s.id = p.strategic_id
+LEFT JOIN missions ms ON ms.id = p.mission_id
+LEFT JOIN plans pl ON pl.id = p.plan_id
+LEFT JOIN outputs o ON o.id = p.output_id
+JOIN project_template_years pty ON pty.id = p.project_template_year_id
+WHERE pty.year = 2566 AND p.deleted_at IS NULL
+LIMIT 10;
+
 -- ดูยุทธศาสตร์ทั้งหมดในปี 2566:
 SELECT id, sequence AS ลำดับ, name AS ชื่อยุทธศาสตร์ FROM strategics
 WHERE year = 2566 AND deleted_at IS NULL ORDER BY sequence;
+
+-- ดูพันธกิจทั้งหมด:
+SELECT id, name AS ชื่อพันธกิจ FROM missions WHERE deleted_at IS NULL ORDER BY id;
 ==============================================
 """
 
