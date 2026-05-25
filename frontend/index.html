@@ -342,7 +342,7 @@
     </div>
     <div class="sidebar-stats" id="db-stats">
       <div class="stat-row"><span>ChromaDB</span><span class="stat-val" id="stat-db">—</span></div>
-      <div class="stat-row"><span>Collection</span><span class="stat-val" id="stat-col">documents</span></div>
+      <div class="stat-row"><span>Collection</span><span class="stat-val" id="stat-col">yru_planning_data</span></div>
       <div class="stat-row"><span>Backend</span><span class="stat-val" id="stat-be">—</span></div>
     </div>
   </aside>
@@ -380,13 +380,13 @@
   let isLoading = false;
 
   const QUICK = [
-    { label: 'แผนกลยุทธ์', q: 'ยุทธศาสตร์และแผนกลยุทธ์ของมหาวิทยาลัยมีอะไรบ้าง?' },
-    { label: 'โครงการ', q: 'โครงการที่อยู่ในระบบมีอะไรบ้าง?' },
-    { label: 'งบประมาณ', q: 'สรุปข้อมูลงบประมาณที่มีในระบบ' },
-    { label: 'แผนงาน', q: 'แผนงานและโปรแกรมในระบบมีอะไรบ้าง?' },
-    { label: 'KPI / ผลลัพธ์', q: 'ตัวชี้วัด KPI ที่ติดตามในระบบมีอะไรบ้าง?' },
-    { label: 'ศูนย์/หน่วยงาน', q: 'ศูนย์หรือหน่วยงานที่มีในระบบ' },
-    { label: 'การจอง', q: 'ข้อมูลการจองและการใช้งานทรัพยากร' },
+    { label: 'ยุทธศาสตร์', q: 'ยุทธศาสตร์ของมหาวิทยาลัยในปี 2566 มีอะไรบ้าง?' },
+    { label: 'พันธกิจ', q: 'พันธกิจของมหาวิทยาลัยราชภัฏยะลามีอะไรบ้าง?' },
+    { label: 'งบประมาณ', q: 'หน่วยงานที่มีงบประมาณสูงสุด 5 อันดับแรกในปี 2566 คือหน่วยงานใดบ้าง?' },
+    { label: 'นับโครงการ', q: 'โครงการที่ได้รับอนุมัติงบประมาณในปี 2566 มีทั้งหมดกี่โครงการ?' },
+    { label: 'หน่วยงาน', q: 'มีหน่วยงานกี่หน่วยงานในระบบ และหน่วยงานใดบ้าง?' },
+    { label: 'แผนงาน', q: 'แผนงานในระบบมีอะไรบ้าง?' },
+    { label: 'KPI ความพึงพอใจ', q: 'โครงการที่มีตัวชี้วัดเรื่องความพึงพอใจมีอะไรบ้าง?' },
   ];
 
   // Build sidebar quick questions
