@@ -45,7 +45,7 @@ _SQL_PATTERNS = [
     r'kpi.*(มี|โครงการ|อะไร|บ้าง)',
 ]
 
-# Patterns that clearly map to RAG (explanations, policy, descriptions)
+# Patterns that clearly map to RAG (explanations, policy, descriptions, project details)
 _RAG_PATTERNS = [
     r'อธิบาย',
     r'หมายความว่า',
@@ -60,6 +60,12 @@ _RAG_PATTERNS = [
     r'มีเนื้อหา.*ว่า',
     r'ในเอกสาร',
     r'ตามเอกสาร',
+    # Project detail retrieval — best answered from ChromaDB rich text
+    r'รายละเอียด.*(โครงการ|แผน|กิจกรรม)',
+    r'(โครงการ|แผน).*(รายละเอียด|เนื้อหา|เกี่ยวกับ|คืออะไร|คือ)',
+    r'ขอ.*(รายละเอียด|ข้อมูล|ทราบ).*(โครงการ|แผน)',
+    r'โครงการ.*(วัตถุประสงค์|หลักการ|ผลลัพธ์|ผลที่คาดหวัง)',
+    r'หลักการ.*(โครงการ|และเหตุผล)',
 ]
 
 

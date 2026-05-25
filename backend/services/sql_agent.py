@@ -121,6 +121,22 @@ JOIN project_template_years pty ON pty.id = p.project_template_year_id
 WHERE pty.year = 2566 AND p.deleted_at IS NULL
 LIMIT 10;
 
+-- *** กฎสำคัญสำหรับการค้นหาชื่อโครงการ ***
+-- ชื่อโครงการเก็บใน project_template_years.name
+-- ใน DB ไม่มีคำว่า "โครงการ" นำหน้า เช่น เก็บเป็น "พัฒนาการเรียนการสอน" ไม่ใช่ "โครงการพัฒนาการเรียนการสอน"
+-- ดังนั้นให้ตัดคำว่า "โครงการ" ออกก่อนแล้วค่อย LIKE search
+-- ตัวอย่าง: ค้นหา "โครงการพัฒนาการเรียนการสอน" → ใช้ py.name LIKE '%พัฒนาการเรียนการสอน%'
+
+-- ค้นหาโครงการด้วยชื่อ (strip คำว่า "โครงการ" ออก):
+SELECT p.id, py.name AS ชื่อโครงการ, d.name AS หน่วยงาน, py.year AS ปี,
+       (COALESCE(p.budget1,0)+COALESCE(p.budget2,0)+COALESCE(p.budget3,0)+COALESCE(p.budget4,0)) AS งบรวม,
+       p.principle AS หลักการ, p.objective AS วัตถุประสงค์
+FROM projects p
+JOIN project_template_years py ON py.id = p.project_template_year_id
+JOIN departments d ON d.id = p.department_id
+WHERE py.name LIKE '%พัฒนาการเรียนการสอน%' AND p.deleted_at IS NULL
+LIMIT 10;
+
 -- ดูยุทธศาสตร์ทั้งหมดในปี 2566:
 SELECT id, sequence AS ลำดับ, name AS ชื่อยุทธศาสตร์ FROM strategics
 WHERE year = 2566 AND deleted_at IS NULL ORDER BY sequence;
@@ -356,6 +372,8 @@ def generate_and_run_sql(query: str) -> str:
         "4. ถ้าถามเกี่ยวกับหน่วยงาน/แผนก ให้ query จาก departments table โดยตรง\n"
         "5. กรองชื่อหน่วยงาน: ใช้ WHERE d.name LIKE '%ชื่อ%' ห้ามใส่ชื่อหน่วยงานใน project_template_years\n"
         "6. เลือก SELECT เฉพาะคอลัมน์ที่มีอยู่จริงตาม Schema ด้านบน\n"
+        "7. ค้นหาชื่อโครงการ: ชื่อเก็บใน py.name (project_template_years.name) — ไม่มีคำว่า 'โครงการ' นำหน้า\n"
+        "   ตัวอย่าง: ถ้าผู้ใช้พูดถึง 'โครงการพัฒนาการเรียนการสอน' ให้ใช้ py.name LIKE '%พัฒนาการเรียนการสอน%'\n"
         "================\n\n"
         "คำถาม: \"{query}\"\n\n"
         "เขียนคำสั่ง SELECT ที่ถูกต้องและเรียบง่ายที่สุด\n"
