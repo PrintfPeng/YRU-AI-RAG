@@ -95,11 +95,47 @@ def _normalize_id(raw_id: str) -> str:
 # -----------------------------------------------------------
 @app.get("/health")
 async def health_check():
+    # ─── MySQL connectivity check ─────────────────────────────────────────────
+    import mysql.connector as _mc
+    mysql_status = "unknown"
+    mysql_error  = None
+    try:
+        _conn = _mc.connect(
+            host=os.getenv("DB_HOST", "10.10.2.154"),
+            user=os.getenv("DB_USER", "ai-sandbox-read"),
+            password=os.getenv("DB_PASSWORD", "9IKAjm.R7Qzm_OIZ"),
+            database=os.getenv("DB_NAME", "ai-sandbox_db"),
+            port=int(os.getenv("DB_PORT", 3306)),
+            connect_timeout=5,
+        )
+        _cur = _conn.cursor()
+        _cur.execute("SELECT COUNT(*) FROM projects WHERE deleted_at IS NULL")
+        _cnt = _cur.fetchone()[0]
+        _cur.close()
+        _conn.close()
+        mysql_status = f"ok (projects={_cnt})"
+    except Exception as _e:
+        mysql_status = "error"
+        mysql_error  = str(_e)
+
+    # ─── ChromaDB check ───────────────────────────────────────────────────────
+    chroma_status = "unknown"
+    try:
+        from .services.vector_store import get_vector_store
+        _vs = get_vector_store()
+        _cnt = _vs._collection.count()
+        chroma_status = f"ok (docs={_cnt})"
+    except Exception as _e:
+        chroma_status = f"error: {_e}"
+
     return {
         "status": "ok",
         "service": "backend",
         "mode": "multi_doc",
         "features": ["hybrid_ingestion", "ocr", "rag"],
+        "mysql":  mysql_status,
+        "mysql_error": mysql_error,
+        "chroma": chroma_status,
     }
 
 

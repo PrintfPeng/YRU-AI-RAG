@@ -306,7 +306,7 @@ def get_db_schema() -> str:
                 pass
         return schema_text
     except Exception as e:
-        print(f"[SQL_Agent] Error fetching schema: {e}")
+        print(f"[SQL_Agent] Error fetching schema: {type(e).__name__}: {e}")
         return ""
     finally:
         if conn and conn.is_connected():
@@ -355,7 +355,12 @@ def generate_and_run_sql(query: str) -> str:
     # 3. Schema (curated, not all 97 tables)
     schema = get_db_schema()
     if not schema:
-        return "ขออภัยครับ ไม่สามารถอ่านโครงสร้างฐานข้อมูลได้ในขณะนี้"
+        # Try to get connection error details for logging
+        try:
+            _db_connect().close()
+        except Exception as _conn_err:
+            print(f"[SQL_Agent] Connection error detail: {type(_conn_err).__name__}: {_conn_err}")
+        return "ขออภัยครับ ไม่สามารถเชื่อมต่อฐานข้อมูลได้ในขณะนี้ (MySQL connection failed)"
 
     llm = LocalLLMProvider.get_primary_llm(temperature=0.0)
 
