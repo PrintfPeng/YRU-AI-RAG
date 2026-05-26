@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import sys, io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 """
 scripts/register_openwebui.py
 ────────────────────────────────────────────────────────────────────
@@ -36,13 +39,13 @@ RAG_BACKEND_KEY   = os.getenv("RAG_BACKEND_KEY", "yru-rag-key")
 TIMEOUT = 10
 
 def step(msg): print(f"  {msg}")
-def ok(msg):   print(f"  ✅ {msg}")
-def warn(msg): print(f"  ⚠️  {msg}")
-def err(msg):  print(f"  ❌ {msg}"); sys.exit(1)
+def ok(msg):   print(f"  [OK] {msg}")
+def warn(msg): print(f"  [WARN] {msg}")
+def err(msg):  print(f"  [FAIL] {msg}"); sys.exit(1)
 
 print()
 print("=" * 60)
-print("  YRU RAG → Open WebUI Self-Registration")
+print("  YRU RAG -> Open WebUI Self-Registration")
 print("=" * 60)
 print(f"  Open WebUI : {OPEN_WEBUI_URL}")
 print(f"  Admin      : {ADMIN_EMAIL}")
