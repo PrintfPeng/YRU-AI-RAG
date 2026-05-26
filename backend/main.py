@@ -11,11 +11,12 @@ import re
 import time
 import hashlib
 import json
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import uuid
 
 # Internal services
 from .services.logger import append_log, read_logs
@@ -23,6 +24,7 @@ from .services.rag import answer_question
 from .services.vector_store import reset_vector_store_cache
 from .services.query_router import route_query
 from .services.sql_agent import generate_and_run_sql
+from .services.openwebui_register import register_with_openwebui
 
 # -----------------------------------------------------------
 # กำหนด Path สำหรับเก็บข้อมูลระบบ
@@ -32,12 +34,26 @@ CHROMA_DB_DIR = Path("chroma_db")   # โฟลเดอร์เก็บฐา
 UPLOAD_DIR = Path("uploads")        # โฟลเดอร์เก็บไฟล์ PDF ต้นฉบับที่ผู้ใช้อัปโหลดมา
 
 # -----------------------------------------------------------
-# ตั้งค่า FastAPI Application
+# ตั้งค่า FastAPI Application (with startup lifespan)
 # -----------------------------------------------------------
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: ลงทะเบียน RAG backend กับ Open WebUI อัตโนมัติ"""
+    # รัน registration แบบ non-blocking (ไม่บล็อก startup)
+    try:
+        await asyncio.to_thread(register_with_openwebui)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[Startup] Open WebUI registration error (non-fatal): {e}")
+    yield  # แอปพลิเคชันทำงานปกติหลังจากนี้
+
 app = FastAPI(
     title="AI Data Ingestion Backend",
     description="Backend for DB, Embeddings, RAG, API, and Evaluation",
     version="0.2.2 (Multi-Doc Final)",
+    lifespan=lifespan,
 )
 
 # CORS Middleware: อนุญาตให้คนในเครือข่ายมหาวิทยาลัยเข้าถึงได้
@@ -505,6 +521,164 @@ def admin_facets(collection: str = "yru_planning_data"):
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+# -----------------------------------------------------------
+# OpenAI-Compatible API  (สำหรับเชื่อมต่อกับ Open WebUI)
+# -----------------------------------------------------------
+# ใช้งาน: เพิ่ม Connection ใน Open WebUI → Admin → Connections
+#   URL : http://<backend_host>:8005
+#   Key : yru-rag-key  (หรือค่าใดก็ได้)
+# จะปรากฎ Model ชื่อ "YRU RAG Assistant" ให้เลือกใช้งาน
+# -----------------------------------------------------------
+
+_RAG_MODEL_ID   = "yru-rag-assistant"
+_RAG_MODEL_NAME = "YRU RAG Assistant"
+
+
+def _build_openai_chunk(content: str, finish_reason=None, model: str = _RAG_MODEL_ID) -> str:
+    """สร้าง SSE chunk ตามฟอร์แมต OpenAI Streaming"""
+    delta = {"role": "assistant", "content": content} if content else {}
+    chunk = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+
+async def _run_rag_pipeline(query: str, doc_ids=None) -> str:
+    """รัน Query Router → SQL Agent / RAG Pipeline แล้วคืน answer string"""
+    route = await asyncio.to_thread(route_query, query)
+    print(f"🔀 [OAI] Routed to [{route.upper()}]: {query[:60]}", flush=True)
+
+    if route == "sql":
+        answer = await asyncio.to_thread(generate_and_run_sql, query)
+    else:
+        result = await answer_question(query=query, doc_ids=doc_ids, top_k=20, mode="auto")
+        answer = result.get("answer", "")
+
+    # ล้าง SHOW_TABLE tags ที่อาจหลุดมา
+    answer = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", answer).strip()
+    return answer
+
+
+@app.get("/v1/models")
+async def openai_list_models():
+    """รายชื่อ Model ที่ระบบ YRU RAG รองรับ (OpenAI format)"""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": _RAG_MODEL_ID,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "yru",
+                "name": _RAG_MODEL_NAME,
+                "description": "YRU Hybrid RAG — SQL Agent + ChromaDB Vector Search",
+            }
+        ],
+    }
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: Request):
+    """
+    OpenAI-compatible Chat Completions endpoint
+    รองรับทั้ง Streaming (stream=true) และ Non-streaming
+    """
+    body = await request.json()
+    messages: list = body.get("messages", [])
+    stream: bool = body.get("stream", False)
+    model: str = body.get("model", _RAG_MODEL_ID)
+
+    # ดึง user message ล่าสุด
+    query = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            # รองรับทั้ง string และ list (multimodal format)
+            if isinstance(content, list):
+                query = " ".join(
+                    p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+                )
+            else:
+                query = str(content)
+            break
+
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="No user message found")
+
+    # ── Streaming Response ──────────────────────────────────────────────────
+    if stream:
+        async def event_stream():
+            try:
+                answer = await _run_rag_pipeline(query)
+
+                # Log
+                try:
+                    append_log({"query": query, "doc_ids": None, "answer": answer, "intent": "openai_stream"})
+                except Exception:
+                    pass
+
+                # ส่ง role chunk ก่อน
+                yield _build_openai_chunk("", finish_reason=None, model=model).replace(
+                    '"content": ""', '"role": "assistant", "content": ""'
+                )
+
+                # ส่ง answer แบบ word-by-word เพื่อ typing effect
+                words = answer.split(" ")
+                for i, word in enumerate(words):
+                    text = word if i == 0 else " " + word
+                    yield _build_openai_chunk(text, model=model)
+                    await asyncio.sleep(0.01)  # delay เล็กน้อยให้ดูเหมือน streaming จริง
+
+                # ส่ง finish chunk
+                yield _build_openai_chunk("", finish_reason="stop", model=model)
+                yield "data: [DONE]\n\n"
+
+            except Exception as e:
+                err_msg = f"ระบบขัดข้อง: {str(e)}"
+                yield _build_openai_chunk(err_msg, finish_reason="stop", model=model)
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",  # ปิด Nginx buffering
+            },
+        )
+
+    # ── Non-Streaming Response ──────────────────────────────────────────────
+    answer = await _run_rag_pipeline(query)
+
+    try:
+        append_log({"query": query, "doc_ids": None, "answer": answer, "intent": "openai"})
+    except Exception:
+        pass
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": len(query.split()),
+            "completion_tokens": len(answer.split()),
+            "total_tokens": len(query.split()) + len(answer.split()),
+        },
+    }
+
 
 # -----------------------------------------------------------
 # API: Redirect หน้าแรกไปยังเว็บแอปพลิเคชัน
