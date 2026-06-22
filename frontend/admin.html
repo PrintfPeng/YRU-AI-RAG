@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChromaDB Admin — YRU AI RAG</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Sarabun', 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    /* ── Top Bar ── */
+    .topbar {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border-bottom: 1px solid #334155;
+      padding: 16px 28px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .topbar .logo { font-size: 22px; }
+    .topbar h1 { font-size: 18px; font-weight: 700; color: #f1f5f9; }
+    .topbar .sub { font-size: 12px; color: #64748b; margin-top: 2px; }
+    .topbar .badge {
+      margin-left: auto;
+      background: #22c55e22;
+      color: #22c55e;
+      border: 1px solid #22c55e44;
+      border-radius: 20px;
+      padding: 3px 12px;
+      font-size: 12px;
+    }
+
+    /* ── Layout ── */
+    .container { max-width: 1400px; margin: 0 auto; padding: 24px 28px; }
+
+    /* ── Stat Cards ── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 18px 20px;
+      cursor: pointer;
+      transition: border-color .2s, transform .1s;
+    }
+    .stat-card:hover { border-color: #6366f1; transform: translateY(-1px); }
+    .stat-card.active { border-color: #6366f1; background: #1e1b4b; }
+    .stat-card .col-name {
+      font-size: 13px;
+      color: #94a3b8;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .stat-card .col-count {
+      font-size: 32px;
+      font-weight: 700;
+      color: #818cf8;
+      margin-top: 6px;
+    }
+    .stat-card .col-label { font-size: 11px; color: #475569; margin-top: 2px; }
+
+    /* ── Filter Bar ── */
+    .filter-bar {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 16px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 20px;
+      align-items: flex-end;
+    }
+    .filter-group { display: flex; flex-direction: column; gap: 4px; }
+    .filter-group label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: .05em; }
+    .filter-group input,
+    .filter-group select {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      color: #e2e8f0;
+      padding: 8px 12px;
+      font-size: 13px;
+      min-width: 160px;
+      transition: border-color .2s;
+    }
+    .filter-group input:focus,
+    .filter-group select:focus { outline: none; border-color: #6366f1; }
+    .filter-group input { min-width: 240px; }
+
+    .btn {
+      padding: 9px 20px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      transition: opacity .2s;
+    }
+    .btn:hover { opacity: .85; }
+    .btn-primary { background: #6366f1; color: #fff; }
+    .btn-ghost { background: #334155; color: #94a3b8; }
+
+    /* ── Result info ── */
+    .result-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      font-size: 13px;
+      color: #64748b;
+    }
+    .result-meta strong { color: #94a3b8; }
+
+    /* ── Table ── */
+    .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #334155; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      background: #1e293b;
+      padding: 12px 14px;
+      text-align: left;
+      color: #64748b;
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: .05em;
+      white-space: nowrap;
+      border-bottom: 1px solid #334155;
+    }
+    tbody tr { border-bottom: 1px solid #1e293b; transition: background .15s; }
+    tbody tr:hover { background: #1e293b; }
+    tbody td { padding: 11px 14px; vertical-align: top; color: #cbd5e1; }
+    tbody td.text-col { max-width: 500px; }
+
+    .text-preview {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      color: #94a3b8;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .text-preview.expanded { -webkit-line-clamp: unset; }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin: 1px;
+    }
+    .tag-source { background: #1e3a5f; color: #60a5fa; }
+    .tag-year   { background: #1c2f1c; color: #4ade80; }
+    .tag-dept   { background: #2d1b69; color: #a78bfa; }
+    .tag-id     { background: #1a1f2e; color: #64748b; font-family: monospace; font-size: 10px; }
+
+    .expand-btn {
+      background: none;
+      border: none;
+      color: #6366f1;
+      font-size: 11px;
+      cursor: pointer;
+      padding: 2px 0;
+      display: block;
+      margin-top: 4px;
+    }
+
+    /* ── Pagination ── */
+    .pagination {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      margin-top: 20px;
+      align-items: center;
+    }
+    .page-btn {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #94a3b8;
+      border-radius: 8px;
+      padding: 7px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: border-color .2s;
+    }
+    .page-btn:hover:not(:disabled) { border-color: #6366f1; color: #818cf8; }
+    .page-btn.active { background: #4338ca; border-color: #6366f1; color: #fff; }
+    .page-btn:disabled { opacity: .3; cursor: default; }
+    .page-info { font-size: 13px; color: #475569; }
+
+    /* ── Loading / Empty ── */
+    .loader {
+      text-align: center;
+      padding: 60px;
+      color: #475569;
+    }
+    .spinner {
+      display: inline-block;
+      width: 28px; height: 28px;
+      border: 3px solid #334155;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      margin-bottom: 12px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .empty { text-align: center; padding: 60px; color: #475569; font-size: 15px; }
+
+    /* ── Modal ── */
+    .modal-bg {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.7);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-bg.open { display: flex; }
+    .modal {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      max-width: 760px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+      padding: 28px;
+    }
+    .modal h2 { font-size: 16px; color: #f1f5f9; margin-bottom: 16px; }
+    .modal .meta-grid {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 8px 12px;
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+    .modal .meta-grid .k { color: #64748b; }
+    .modal .meta-grid .v { color: #cbd5e1; word-break: break-all; }
+    .modal .full-text {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 13px;
+      color: #94a3b8;
+      line-height: 1.8;
+      white-space: pre-wrap;
+    }
+    .modal-close {
+      float: right;
+      background: #334155;
+      border: none;
+      color: #94a3b8;
+      border-radius: 6px;
+      padding: 4px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<div class="topbar">
+  <span class="logo">🧠</span>
+  <div>
+    <div class="h1">ChromaDB Admin Dashboard</div>
+    <div class="sub">YRU AI RAG — Vector Database Browser</div>
+  </div>
+  <span class="badge" id="status-badge">กำลังโหลด...</span>
+</div>
+
+<!-- Main Content -->
+<div class="container">
+
+  <!-- Collection Cards -->
+  <div class="stats-grid" id="collection-cards">
+    <div class="loader"><div class="spinner"></div><div>กำลังโหลด collections...</div></div>
+  </div>
+
+  <!-- Filters -->
+  <div class="filter-bar">
+    <div class="filter-group">
+      <label>ค้นหาเนื้อหา</label>
+      <input type="text" id="f-keyword" placeholder="พิมพ์คำค้นหา..." />
+    </div>
+    <div class="filter-group">
+      <label>ปี พ.ศ.</label>
+      <select id="f-year"><option value="">ทุกปี</option></select>
+    </div>
+    <div class="filter-group">
+      <label>หน่วยงาน</label>
+      <select id="f-dept"><option value="">ทุกหน่วยงาน</option></select>
+    </div>
+    <div class="filter-group">
+      <label>แหล่งข้อมูล</label>
+      <select id="f-source"><option value="">ทุกแหล่ง</option></select>
+    </div>
+    <button class="btn btn-primary" onclick="search()">🔍 ค้นหา</button>
+    <button class="btn btn-ghost" onclick="clearFilters()">✕ ล้าง</button>
+  </div>
+
+  <!-- Result meta -->
+  <div class="result-meta">
+    <span id="result-info">—</span>
+    <span id="page-info-top"></span>
+  </div>
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:44px">#</th>
+          <th>Document ID</th>
+          <th>Metadata</th>
+          <th>เนื้อหา (Text Preview)</th>
+          <th style="width:70px">รายละเอียด</th>
+        </tr>
+      </thead>
+      <tbody id="table-body">
+        <tr><td colspan="5" class="loader"><div class="spinner"></div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Pagination -->
+  <div class="pagination" id="pagination"></div>
+</div>
+
+<!-- Detail Modal -->
+<div class="modal-bg" id="modal-bg" onclick="closeModal(event)">
+  <div class="modal" id="modal-content">
+    <button class="modal-close" onclick="closeModal()">✕ ปิด</button>
+    <h2 id="modal-title">รายละเอียด</h2>
+    <div class="meta-grid" id="modal-meta"></div>
+    <div class="full-text" id="modal-text"></div>
+  </div>
+</div>
+
+<script>
+const API = '';  // same origin
+let currentCollection = 'yru_planning_data';
+let currentPage = 1;
+const PAGE_SIZE = 20;
+let totalPages = 1;
+
+// ─── Init ────────────────────────────────────────────────
+async function init() {
+  await loadCollections();
+  await loadFacets();
+  await loadData();
+}
+
+// ─── Collections ────────────────────────────────────────
+async function loadCollections() {
+  const res = await fetch(`${API}/api/admin/collections`);
+  const json = await res.json();
+  if (json.status !== 'success') return;
+
+  const grid = document.getElementById('collection-cards');
+  grid.innerHTML = '';
+  let total = 0;
+  json.collections.forEach(col => {
+    total += col.count;
+    const card = document.createElement('div');
+    card.className = 'stat-card' + (col.name === currentCollection ? ' active' : '');
+    card.innerHTML = `
+      <div class="col-name" title="${col.name}">${col.name}</div>
+      <div class="col-count">${col.count.toLocaleString()}</div>
+      <div class="col-label">documents</div>
+    `;
+    card.onclick = () => switchCollection(col.name, card);
+    grid.appendChild(card);
+  });
+
+  document.getElementById('status-badge').textContent =
+    `${json.collections.length} collections · ${total.toLocaleString()} docs`;
+}
+
+function switchCollection(name, card) {
+  currentCollection = name;
+  currentPage = 1;
+  document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+  card.classList.add('active');
+  clearFilters(false);
+  loadFacets();
+  loadData();
+}
+
+// ─── Facets ─────────────────────────────────────────────
+async function loadFacets() {
+  const res = await fetch(`${API}/api/admin/facets?collection=${currentCollection}`);
+  const json = await res.json();
+  if (json.status !== 'success') return;
+
+  fillSelect('f-year', json.years, 'ทุกปี');
+  fillSelect('f-dept', json.departments, 'ทุกหน่วยงาน');
+  fillSelect('f-source', json.sources, 'ทุกแหล่ง');
+}
+
+function fillSelect(id, values, placeholder) {
+  const sel = document.getElementById(id);
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">${placeholder}</option>`;
+  values.forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v; opt.textContent = v;
+    if (v === cur) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+// ─── Data Load ──────────────────────────────────────────
+async function loadData() {
+  const keyword  = document.getElementById('f-keyword').value.trim();
+  const year     = document.getElementById('f-year').value;
+  const dept     = document.getElementById('f-dept').value;
+  const source   = document.getElementById('f-source').value;
+
+  const tbody = document.getElementById('table-body');
+  tbody.innerHTML = `<tr><td colspan="5" class="loader"><div class="spinner"></div><div>กำลังโหลดข้อมูล...</div></td></tr>`;
+
+  const params = new URLSearchParams({
+    collection: currentCollection,
+    page: currentPage,
+    limit: PAGE_SIZE,
+    keyword, year, department: dept, source
+  });
+
+  try {
+    const res  = await fetch(`${API}/api/admin/browse?${params}`);
+    const json = await res.json();
+    if (json.status !== 'success') {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">❌ ${json.message}</td></tr>`;
+      return;
+    }
+
+    totalPages = json.total_pages;
+    const offset = (currentPage - 1) * PAGE_SIZE;
+
+    // Result info
+    document.getElementById('result-info').innerHTML =
+      `แสดง <strong>${json.data.length}</strong> รายการ จากทั้งหมด <strong>${json.filtered_total.toLocaleString()}</strong> รายการ ` +
+      `(collection ทั้งหมด ${json.total.toLocaleString()} docs)`;
+
+    // Rows
+    if (!json.data.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">🔍 ไม่พบข้อมูลที่ตรงกัน</td></tr>`;
+      renderPagination(json.total_pages);
+      return;
+    }
+
+    tbody.innerHTML = '';
+    json.data.forEach((row, i) => {
+      const meta = row.metadata || {};
+      const tags = buildTags(meta);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="color:#475569">${offset + i + 1}</td>
+        <td><span class="tag tag-id">${row.id || '—'}</span></td>
+        <td>${tags}</td>
+        <td class="text-col">
+          <div class="text-preview" id="prev-${i}">${escHtml(row.text || '')}</div>
+          <button class="expand-btn" onclick="toggleExpand(${i}, this)">ดูเพิ่มเติม ▼</button>
+        </td>
+        <td>
+          <button class="btn btn-ghost" style="padding:5px 10px;font-size:11px"
+            onclick='openModal(${JSON.stringify(row).replace(/'/g, "&#39;")})'>
+            ดูเต็ม
+          </button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    renderPagination(totalPages);
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty">⚠️ ${e.message}</td></tr>`;
+  }
+}
+
+function buildTags(meta) {
+  const parts = [];
+  if (meta.source)     parts.push(`<span class="tag tag-source">${meta.source}</span>`);
+  if (meta.year)       parts.push(`<span class="tag tag-year">พ.ศ. ${meta.year}</span>`);
+  if (meta.department) parts.push(`<span class="tag tag-dept" title="${meta.department}">${truncate(meta.department, 20)}</span>`);
+  if (meta.table && meta.table !== 'projects')
+                       parts.push(`<span class="tag tag-source">${meta.table}</span>`);
+  if (meta.project_id) parts.push(`<span class="tag tag-id">id:${meta.project_id}</span>`);
+  return parts.join(' ') || '<span style="color:#475569">—</span>';
+}
+
+// ─── Pagination ─────────────────────────────────────────
+function renderPagination(total) {
+  const pag = document.getElementById('pagination');
+  pag.innerHTML = '';
+  if (total <= 1) return;
+
+  const addBtn = (label, page, active, disabled) => {
+    const btn = document.createElement('button');
+    btn.className = 'page-btn' + (active ? ' active' : '');
+    btn.textContent = label;
+    btn.disabled = disabled;
+    btn.onclick = () => { currentPage = page; loadData(); window.scrollTo(0,0); };
+    pag.appendChild(btn);
+  };
+
+  addBtn('«', 1, false, currentPage === 1);
+  addBtn('‹', currentPage - 1, false, currentPage === 1);
+
+  const start = Math.max(1, currentPage - 2);
+  const end   = Math.min(total, currentPage + 2);
+  for (let p = start; p <= end; p++) addBtn(p, p, p === currentPage, false);
+
+  addBtn('›', currentPage + 1, false, currentPage === total);
+  addBtn('»', total, false, currentPage === total);
+
+  const info = document.createElement('span');
+  info.className = 'page-info';
+  info.textContent = `หน้า ${currentPage} / ${total}`;
+  pag.appendChild(info);
+}
+
+// ─── Modal ──────────────────────────────────────────────
+function openModal(row) {
+  const meta = row.metadata || {};
+  document.getElementById('modal-title').textContent = `Document: ${row.id}`;
+
+  let metaHtml = '';
+  for (const [k, v] of Object.entries(meta)) {
+    metaHtml += `<div class="k">${k}</div><div class="v">${escHtml(String(v))}</div>`;
+  }
+  document.getElementById('modal-meta').innerHTML = metaHtml || '<div style="color:#475569">ไม่มี metadata</div>';
+  document.getElementById('modal-text').textContent = row.text || '';
+  document.getElementById('modal-bg').classList.add('open');
+}
+
+function closeModal(e) {
+  if (!e || e.target === document.getElementById('modal-bg'))
+    document.getElementById('modal-bg').classList.remove('open');
+}
+
+// ─── Helpers ────────────────────────────────────────────
+function search() { currentPage = 1; loadData(); }
+
+function clearFilters(reload = true) {
+  document.getElementById('f-keyword').value = '';
+  document.getElementById('f-year').value = '';
+  document.getElementById('f-dept').value = '';
+  document.getElementById('f-source').value = '';
+  if (reload) { currentPage = 1; loadData(); }
+}
+
+function toggleExpand(i, btn) {
+  const el = document.getElementById(`prev-${i}`);
+  const expanded = el.classList.toggle('expanded');
+  btn.textContent = expanded ? 'ย่อ ▲' : 'ดูเพิ่มเติม ▼';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function truncate(s, n) { return s.length > n ? s.slice(0, n) + '…' : s; }
+
+// Enter to search
+document.getElementById('f-keyword').addEventListener('keydown', e => {
+  if (e.key === 'Enter') search();
+});
+
+// Start
+init();
+</script>
+</body>
+</html>

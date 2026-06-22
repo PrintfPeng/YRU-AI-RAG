@@ -1,0 +1,346 @@
+# =============================================================================
+# YRU AI SPACE - Unified docker-compose.yml (Strict Security & Password Enforced)
+# =============================================================================
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "${OLLAMA_BIND_IP:-10.20.41.229}:${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ./ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_MAX_QUEUE=${OLLAMA_MAX_QUEUE:-512}
+      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_REQUEST_TIMEOUT=3600
+      - OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE:-q8_0}
+      - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
+      - OLLAMA_SCHED_SPREAD=${OLLAMA_SCHED_SPREAD:-1}
+      - OLLAMA_HOST=0.0.0.0
+      - HF_TOKEN=${HF_TOKEN}
+      - OLLAMA_ORIGINS=*
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  docling:
+    image: quay.io/docling-project/docling-serve:latest
+    container_name: docling
+    ports:
+      - "${DOCLING_BIND_IP:-10.20.41.229}:${DOCLING_PORT:-5001}:5001"
+    volumes:
+      - ./docling-models/EasyOcr:/opt/app-root/src/.cache/docling/models/EasyOcr
+    environment:
+      - DOCLING_SERVE_ENABLE_UI=true
+      - DOCLING_SERVE_MAX_SYNC_WAIT=3600
+      - DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT=3600
+      - DOCLING_SERVE_MAX_FILE_SIZE=536870912
+      - DOCLING_SERVE_ENG_LOC_NUM_WORKERS=2
+      - DOCLING_SERVE_ENABLE_REMOTE_SERVICES=true
+      - UVICORN_WORKERS=1
+      - UVICORN_TIMEOUT_KEEP_ALIVE=3600
+      - HF_HUB_OFFLINE=0
+      - EASYOCR_MODULE_PATH=/opt/app-root/src/.cache/docling/models/EasyOcr
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 2400s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+
+  ocrmypdf:
+    build:
+      context: .
+      dockerfile: Dockerfile.ocrmypdf
+    container_name: ocrmypdf
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./ocr-inbox:/in
+      - ./ocr-outbox:/out
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    container_name: yru-rag-qdrant-local
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant-data:/qdrant/storage
+    environment:
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+      - QDRANT__SERVICE__READ_ONLY_API_KEY=${QDRANT_READ_API_KEY}
+      - QDRANT__TELEMETRY_DISABLED=true
+      - QDRANT__SERVICE__MAX_REQUEST_SIZE_MB=512
+      - QDRANT__SERVICE__MAX_WORKERS=4
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS=2
+      - QDRANT__STORAGE__WAL__WAL_CAPACITY_MB=128
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "${OPEN_WEBUI_PORT:-3000}:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - WEBUI_NAME=${WEBUI_NAME:-YRU AI Assistant}
+      - ENABLE_SIGNUP=${ENABLE_SIGNUP:-false}
+      - DEFAULT_USER_ROLE=user
+      - OAUTH_AUTHORIZE_PARAMS={"prompt":"login"}
+      - ENABLE_OLLAMA_API=true
+      - ENABLE_PERSISTENT_CONFIG=false
+      - VECTOR_DB=qdrant
+      - QDRANT_URI=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - RAG_EMBEDDING_ENGINE=ollama
+      - RAG_OLLAMA_BASE_URL=http://ollama:11434
+      - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-bge-m3}
+      - RAG_EMBEDDING_BATCH_SIZE=${RAG_EMBEDDING_BATCH_SIZE:-8}
+      - RAG_TOP_K=${RAG_TOP_K:-5}
+      - RAG_RELEVANCE_THRESHOLD=${RAG_RELEVANCE_THRESHOLD:-0.0}
+      - ENABLE_RAG_HYBRID_SEARCH=${ENABLE_RAG_HYBRID_SEARCH:-true}
+      - RAG_RERANKING_ENGINE=local
+      - RAG_RERANKING_MODEL=${RAG_RERANKING_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RAG_TEXT_SPLITTER=${RAG_TEXT_SPLITTER:-token}
+      - CHUNK_SIZE=${CHUNK_SIZE:-1000}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-150}
+      - CONTENT_EXTRACTION_ENGINE=docling
+      - DOCLING_SERVER_URL=http://docling:5001
+      - DOCLING_OCR_ENGINE=easyocr
+      - DOCLING_OCR_LANG=th,en
+      - PDF_EXTRACT_IMAGES=false
+      - ENABLE_RAG_WEB_SEARCH=${ENABLE_RAG_WEB_SEARCH:-false}
+      - OPENAI_API_BASE_URL=http://10.20.41.108:8005/v1
+      # ── YRU Passport OIDC ─────────────────────────────────────────────
+      - ENABLE_OAUTH_SIGNUP=true
+      - OAUTH_MERGE_ACCOUNTS_BY_EMAIL=true
+      - OAUTH_CLIENT_ID=244
+      - OAUTH_CLIENT_SECRET=YOUR_CLIENT_SECRET_HERE
+      - OPENID_PROVIDER_URL=http://oidc-discovery/.well-known/openid-configuration
+      - OAUTH_PROVIDER_NAME=YRU Passport
+      - OAUTH_SCOPES=openid profile email
+      - OAUTH_USERNAME_CLAIM=preferred_username
+      - OAUTH_EMAIL_CLAIM=email
+      - OAUTH_PICTURE_CLAIM=avatar
+      - OPENAI_API_KEY=yru-rag-key
+      - ENABLE_OPENAI_API=true
+      - AIOHTTP_CLIENT_TIMEOUT=3600
+      - AIOHTTP_CLIENT_TIMEOUT_OPENAI_MODEL_LIST=300
+      - RAG_FILE_MAX_COUNT=10
+      - RAG_FILE_MAX_SIZE=512
+    volumes:
+      - ./open-webui-data:/app/backend/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+      docling:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: yru-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - TZ=Asia/Bangkok
+      - PGTZ=Asia/Bangkok
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  url-manager:
+    build:
+      context: ./url-manager
+      dockerfile: Dockerfile
+    container_name: yru-url-manager
+    ports:
+      - "${URL_MANAGER_PORT:-8080}:8080"
+    environment:
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_USER=${POSTGRES_USER}
+      - PG_PASSWORD=${POSTGRES_PASSWORD}
+      - PG_DATABASE=${POSTGRES_DB}
+      - TZ=Asia/Bangkok
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: yru-n8n
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      - GENERIC_TIMEZONE=Asia/Bangkok
+      - TZ=Asia/Bangkok
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=${N8N_WEBHOOK_URL}
+      - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE}
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_SECURE_COOKIE=${N8N_SECURE_COOKIE}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${N8N_POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_POSTGRESDB_SCHEMA=public
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=336
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - URL_MANAGER_BASE=http://url-manager:8080
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+    volumes:
+      - ./n8n-data:/home/node/.n8n
+      - ./n8n-workflows:/workflows:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      url-manager:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      docling:
+        condition: service_healthy
+      ocrmypdf:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    container_name: yru-mysql
+    profiles: ["mysql"]
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --skip-name-resolve
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - TZ=Asia/Bangkok
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  phpmyadmin:
+    image: phpmyadmin:5
+    container_name: yru-phpmyadmin
+    profiles: ["mysql"]
+    ports:
+      - "${PHPMYADMIN_PORT:-8081}:80"
+    environment:
+      - PMA_HOST=mysql
+      - PMA_PORT=3306
+      - PMA_ARBITRARY=0
+      - AUTH_TYPE=cookie
+      - UPLOAD_LIMIT=512M
+      - MEMORY_LIMIT=1G
+      - MAX_EXECUTION_TIME=600
+      - TZ=Asia/Bangkok
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dbx:
+    image: t8y2/dbx
+    container_name: yru-dbx
+    ports:
+      - "${DBX_PORT:-4224}:4224"
+    volumes:
+      - dbx-data:/app/data
+    restart: unless-stopped
+
+  userinfo-proxy:
+    build: ./userinfo-proxy
+    container_name: userinfo-proxy
+    restart: unless-stopped
+
+
+  oidc-discovery:
+    image: nginx:alpine
+    container_name: oidc-discovery
+    volumes:
+      - ./oidc-discovery/well-known:/usr/share/nginx/html/.well-known:ro
+    restart: unless-stopped
+
+
+volumes:
+  dbx-data:

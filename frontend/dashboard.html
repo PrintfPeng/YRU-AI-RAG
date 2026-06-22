@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChromaDB Vector Dashboard</title>
+    <!-- Use Tailwind CSS for rapid styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Kanit:wght@300;400;500;600&display=swap');
+        body { font-family: 'Kanit', 'Inter', sans-serif; background-color: #f8fafc; }
+        .glass-panel { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.3); }
+        .data-row:hover { background-color: #f1f5f9; cursor: pointer; transition: all 0.2s; }
+        .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3b82f6; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="text-slate-800">
+
+    <!-- Navigation -->
+    <nav class="bg-indigo-600 text-white shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <div class="flex items-center space-x-3">
+                    <i class="fa-solid fa-brain text-2xl text-indigo-200"></i>
+                    <span class="font-bold text-xl tracking-wide">YRU AI Space : Vector Dashboard</span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        
+        <!-- Stats Section -->
+        <div class="mb-8">
+            <h2 class="text-2xl font-semibold mb-4 text-indigo-900 border-b pb-2"><i class="fa-solid fa-chart-pie mr-2 text-indigo-500"></i>ภาพรวมฐานข้อมูล (ChromaDB)</h2>
+            <div id="stats-loading" class="flex items-center justify-center py-8"><div class="loader"></div><span class="ml-3 text-slate-500">กำลังโหลดสถิติ...</span></div>
+            
+            <div id="stats-container" class="grid grid-cols-1 md:grid-cols-3 gap-6 hidden">
+                <div class="glass-panel p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center space-x-4">
+                    <div class="p-4 bg-blue-100 text-blue-600 rounded-full"><i class="fa-solid fa-database text-2xl"></i></div>
+                    <div>
+                        <p class="text-sm text-slate-500 font-medium uppercase">Total Vectors (จำนวนข้อมูล)</p>
+                        <h3 id="stat-count" class="text-3xl font-bold text-slate-800">-</h3>
+                    </div>
+                </div>
+                <div class="glass-panel p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center space-x-4">
+                    <div class="p-4 bg-purple-100 text-purple-600 rounded-full"><i class="fa-solid fa-folder-tree text-2xl"></i></div>
+                    <div>
+                        <p class="text-sm text-slate-500 font-medium uppercase">Collection Name</p>
+                        <h3 id="stat-collection" class="text-xl font-bold text-slate-800">-</h3>
+                    </div>
+                </div>
+                <div class="glass-panel p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center space-x-4">
+                    <div class="p-4 bg-green-100 text-green-600 rounded-full"><i class="fa-solid fa-server text-2xl"></i></div>
+                    <div>
+                        <p class="text-sm text-slate-500 font-medium uppercase">Database Status</p>
+                        <h3 class="text-xl font-bold text-green-600">Online & Ready</h3>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Data Sample Section -->
+        <div>
+            <div class="flex justify-between items-center mb-4 border-b pb-2">
+                <h2 class="text-2xl font-semibold text-indigo-900"><i class="fa-solid fa-list mr-2 text-indigo-500"></i>ข้อมูลตัวอย่างในสมอง AI (Top 100)</h2>
+                <button onclick="loadSamples()" class="px-4 py-2 bg-indigo-50 text-indigo-600 hover:bg-indigo-100 rounded-lg text-sm font-medium transition flex items-center">
+                    <i class="fa-solid fa-rotate-right mr-2"></i> รีเฟรชข้อมูล
+                </button>
+            </div>
+            
+            <div class="glass-panel rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200">
+                        <thead class="bg-slate-50">
+                            <tr>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">ID & Source</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/2">Text Content (เนื้อหาที่ให้ AI อ่าน)</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">Metadata</th>
+                            </tr>
+                        </thead>
+                        <tbody id="data-tbody" class="bg-white divide-y divide-slate-100">
+                            <tr><td colspan="3" class="px-6 py-10 text-center text-slate-500"><div class="flex justify-center"><div class="loader"></div></div></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        async function loadStats() {
+            try {
+                const res = await fetch('/api/database/stats');
+                const json = await res.json();
+                document.getElementById('stats-loading').classList.add('hidden');
+                document.getElementById('stats-container').classList.remove('hidden');
+                
+                if(json.status === 'success') {
+                    document.getElementById('stat-count').innerText = json.data.sample_count.toLocaleString();
+                    document.getElementById('stat-collection').innerText = json.data.collection_name;
+                }
+            } catch (err) {
+                console.error("Error loading stats", err);
+            }
+        }
+
+        async function loadSamples() {
+            const tbody = document.getElementById('data-tbody');
+            tbody.innerHTML = '<tr><td colspan="3" class="px-6 py-10 text-center"><div class="flex justify-center"><div class="loader"></div></div></td></tr>';
+            
+            try {
+                // โหลดมา 100 รายการ
+                const res = await fetch('/api/database/sample?limit=100');
+                const json = await res.json();
+                
+                if(json.status === 'success' && json.data.length > 0) {
+                    tbody.innerHTML = '';
+                    json.data.forEach(item => {
+                        const tr = document.createElement('tr');
+                        tr.className = 'data-row';
+                        
+                        // Formatting ID & Source
+                        const source = item.metadata.source || 'Unknown';
+                        const idCol = `
+                            <div class="text-xs font-mono text-slate-400 truncate w-48" title="${item.id}">${item.id}</div>
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800 mt-2">
+                                <i class="fa-solid fa-tag mr-1"></i> ${source}
+                            </span>
+                        `;
+
+                        // Formatting Text Content
+                        let text = item.text;
+                        if(text.length > 200) text = text.substring(0, 200) + '...';
+                        const textCol = `<div class="text-sm text-slate-700 whitespace-pre-wrap">${text}</div>`;
+
+                        // Formatting Metadata
+                        let metaHtml = '<div class="space-y-1">';
+                        for (const [key, value] of Object.entries(item.metadata)) {
+                            // ซ่อน metadata ที่ยาวเกินไป
+                            if (typeof value === 'string' && value.length > 50) continue;
+                            if (key === 'source') continue; // แสดงไปแล้ว
+                            metaHtml += `<div class="text-xs"><span class="font-semibold text-slate-500">${key}:</span> <span class="text-slate-700">${value}</span></div>`;
+                        }
+                        metaHtml += '</div>';
+
+                        tr.innerHTML = `
+                            <td class="px-6 py-4 align-top">${idCol}</td>
+                            <td class="px-6 py-4 align-top">${textCol}</td>
+                            <td class="px-6 py-4 align-top bg-slate-50">${metaHtml}</td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="3" class="px-6 py-10 text-center text-slate-500">ไม่มีข้อมูลในระบบ</td></tr>';
+                }
+            } catch (err) {
+                console.error("Error loading samples", err);
+                tbody.innerHTML = '<tr><td colspan="3" class="px-6 py-10 text-center text-red-500">เกิดข้อผิดพลาดในการดึงข้อมูล</td></tr>';
+            }
+        }
+
+        // Initialize
+        loadStats();
+        loadSamples();
+    </script>
+</body>
+</html>

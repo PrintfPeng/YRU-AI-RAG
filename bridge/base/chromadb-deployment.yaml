@@ -1,0 +1,40 @@
+#! chromadb-deployment.yaml
+# Generated code, do not edit
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: chromadb
+    namespace: data-ingestion-hybrid-rag
+    labels:
+        com.docker.compose.project: data_ingestion_hybrid_rag
+        com.docker.compose.service: chromadb
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            com.docker.compose.project: data_ingestion_hybrid_rag
+            com.docker.compose.service: chromadb
+    strategy:
+        type: Recreate
+    template:
+        metadata:
+            labels:
+                com.docker.compose.project: data_ingestion_hybrid_rag
+                com.docker.compose.service: chromadb
+                com.docker.compose.network.rag_network: "true"
+        spec:
+            restartPolicy: unless-stopped
+            containers:
+                - name: hybrid-rag-chromadb
+                  image: chromadb/chroma:latest
+                  imagePullPolicy: IfNotPresent
+                  ports:
+                    - name: chromadb-8000
+                      containerPort: 8000
+                  volumeMounts:
+                    - name: chroma-chroma
+                      mountPath: /chroma/chroma
+            volumes:
+                - name: chroma-chroma
+                  hostPath:
+                    path: D:\All-Source-Code\YRU-All-CODE\YRU-AI-SPACE-NEW\Data_Ingestion_Hybrid_RAG\chroma_db
