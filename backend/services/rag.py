@@ -77,7 +77,7 @@ _BYPASS_QUERY_REWRITE = os.getenv("BYPASS_QUERY_REWRITE", "false").lower() == "t
 _RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # การตั้งค่าเกณฑ์คัดกรองความแม่นยำ (Threshold Configurations)
-MIN_SCORE_THRESHOLD = 0.20  # กรองเนื้อหาที่ไม่เกี่ยวข้องออก (ยิ่งสูงยิ่งเข้มงวด)
+MIN_SCORE_THRESHOLD = 0.15  # กรองเนื้อหาที่ไม่เกี่ยวข้องออก
 MIN_KEYWORD_OVERLAP = 1     # ต้องมีคำสำคัญตรงกันอย่างน้อย 1 คำ (ใช้เฉพาะกรณีมี CrossEncoder)
 
 INTENT_THRESHOLDS = {
@@ -491,8 +491,7 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
             # เอกสารที่ได้มาจาก vector search ล้วนมีความเกี่ยวข้องในระดับหนึ่งแล้ว
             # ให้ baseline = 0.15 (ผ่าน threshold ชัดเจน) + bonus จาก keyword + penalty ตามลำดับ
             rank_penalty = (rank / top_count) * 0.05
-            kw_score = kw * 0.08
-            d.metadata["ai_score"] = min(0.5, kw_score - rank_penalty) if kw > 0 else 0.05
+            d.metadata["ai_score"] = max(0.0, kw * 0.05 - rank_penalty)
             logger.debug(f"[rerank-fallback] doc rank={rank} kw={kw} ai_score={d.metadata['ai_score']:.3f}")
 
     return scored_docs[:top_k]
@@ -712,9 +711,6 @@ async def answer_question(
     # 3. เตรียมคำถามและวิเคราะห์เจตนา (Query Preparation & Intent Analysis)
     llm_fast = _get_llm_instance(model=_LL_MODEL_FAST)
     search_query = query 
-    if chat_history and llm_fast and not _BYPASS_QUERY_REWRITE:
-        search_query = await _rewrite_query(query, chat_history, llm_fast)
-        logger.info(f"[rag] Rewritten Query: '{query}' -> '{search_query}'")
 
     if _detect_general_intent(query):
         return {
@@ -902,21 +898,18 @@ async def answer_question(
             "\n"
             "## ประเภทที่ 1: ข้อมูลจาก MySQL (source: mysql_planning)\n"
             "- เป็นข้อมูลโครงการ งบประมาณ ยุทธศาสตร์ แผนงาน KPI ของมหาวิทยาลัย\n"
-            "- แสดงผลเป็นข้อความธรรมดา หรือ Markdown Table (เท่านั้น)\n"
-            "- ให้ตอบเป็นข้อความ / รายการ / หรือ Markdown Table (| คอลัมน์ | คอลัมน์ |) ตามความเหมาะสม\n"
+            "- ให้แสดงผลเป็นข้อความธรรมดา (Plain Text) หรือตาราง Markdown (| คอลัมน์ | คอลัมน์ |) เท่านั้น\n"
             "\n"
-            "## ประเภทที่ 2: ตารางจาก PDF (หัวข้อ SOURCE มีระบุ TYPE: TABLE และรหัส [SHOW_TABLE:TBL_x])\n"
-            "- ให้ใช้รหัส [SHOW_TABLE:TBL_x] ตามที่ระบุในหัวข้อ SOURCE เท่านั้น\n"
-            "- ห้ามสร้างรหัสขึ้นมาเอง เช่น ห้ามพิมพ์ [SHOW_TABLE:TBL_projects]\n"
+            "## ประเภทที่ 2: ตารางจาก PDF\n"
+            "- ใช้รหัส [SHOW_TABLE:TBL_x] ตามที่มีระบุไว้ในหัวข้อ SOURCE อย่างเคร่งครัดเท่านั้น\n"
             "\n"
             "## ประเภทที่ 3: รูปภาพ (source: image)\n"
-            "- ให้ใช้ [SHOW_IMAGE: images/ชื่อไฟล์] ตาม image_path ใน SOURCE เท่านั้น\n"
+            "- ใช้รหัส [SHOW_IMAGE: images/ชื่อไฟล์] ตาม image_path ใน SOURCE เท่านั้น\n"
             "\n"
             "⚠️ กฎเหล็กเพิ่มเติม:\n"
-            "1. ต้องตอบด้วยข้อมูลจาก CONTEXT เสมอ ห้ามปฏิเสธหรือบอกว่าไม่มีข้อมูลหากมีข้อมูลอยู่ใน CONTEXT\n"
-            "2. ห้ามแต่งข้อมูลเพิ่มเติมหรือคาดเดา ตอบจาก CONTEXT เท่านั้น\n"
-            "3. ห้ามใส่ [SOURCE x] หรือ (อ้างอิงจาก SOURCE x) ท้ายคำตอบ\n"
-            "4. ถ้าข้อมูลมีหลายรายการ ให้แสดงในรูปแบบตาราง Markdown หรือรายการ bullet points\n"
+            "1. ตอบคำถามโดยอ้างอิงจากข้อมูลใน CONTEXT ที่ให้มาเท่านั้น\n"
+            "2. แสดงรายการต่างๆ ด้วยรูปแบบตาราง Markdown หรือ bullet points เพื่อให้อ่านง่าย\n"
+            "3. ตอบเนื้อหาได้เลยโดยไม่ต้องใส่หมายเลขอ้างอิง [SOURCE] ต่อท้ายประโยค\n"
             "\n"
             f"=== DOCUMENT CONTEXT ===\n{context_text}\n========================"
         )

@@ -435,11 +435,8 @@ def generate_and_run_sql(query: str) -> str:
             last_error = err
             print(f"[SQL_Agent] MySQL Error [{err.errno}] attempt {attempt + 1}: {err.msg}")
             if attempt == 0 and err.errno in (1054, 1064, 1146):
-                _fallback = _build_fallback_sql(query)
-                if _fallback is None:
-                    return "ขออภัยครับ ไม่สามารถสร้างคำสั่ง SQL สำหรับคำถามนี้ได้ กรุณาลองถามใหม่ด้วยภาษาที่ชัดเจนขึ้นครับ"
-                raw_sql = _fix_sql_years(_fallback)
-                print(f"[SQL_Agent] Retrying with fallback SQL: {raw_sql}")
+                print("[SQL_Agent] Query fails syntax/schema check. Aborting fallback to prevent hallucination.")
+                break
             else:
                 break
         except Exception as e:
