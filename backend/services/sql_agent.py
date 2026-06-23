@@ -279,13 +279,7 @@ def _build_fallback_sql(query: str) -> str:
             f"JOIN project_template_years pty ON pty.id = p.project_template_year_id "
             f"WHERE pty.year = {be_year} LIMIT 20"
         )
-    return (
-        "SELECT p.id, d.name AS หน่วยงาน, s.name AS สถานะ, p.principle "
-        "FROM projects p "
-        "JOIN departments d ON d.id = p.department_id "
-        "JOIN statuses s ON s.status = p.status_id "
-        "LIMIT 20"
-    )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -441,8 +435,10 @@ def generate_and_run_sql(query: str) -> str:
             last_error = err
             print(f"[SQL_Agent] MySQL Error [{err.errno}] attempt {attempt + 1}: {err.msg}")
             if attempt == 0 and err.errno in (1054, 1064, 1146):
-                raw_sql = _build_fallback_sql(query)
-                raw_sql = _fix_sql_years(raw_sql)
+                _fallback = _build_fallback_sql(query)
+                if _fallback is None:
+                    return "ขออภัยครับ ไม่สามารถสร้างคำสั่ง SQL สำหรับคำถามนี้ได้ กรุณาลองถามใหม่ด้วยภาษาที่ชัดเจนขึ้นครับ"
+                raw_sql = _fix_sql_years(_fallback)
                 print(f"[SQL_Agent] Retrying with fallback SQL: {raw_sql}")
             else:
                 break
@@ -476,7 +472,7 @@ def generate_and_run_sql(query: str) -> str:
         "- สรุปใจความสำคัญให้กระชับ ไม่จำเป็นต้องยกมาทั้งประโยคถ้าไม่จำเป็น\n"
         "- หากข้อมูลไม่เพียงพอ ให้ตอบอย่างสุภาพว่าไม่ทราบข้อมูลนี้ แทนการสร้างข้อมูลขึ้นมาเอง\n"
         "- ถ้ามีหลายรายการให้แสดงเป็น bullet points หรือ Markdown Table\n"
-        "- ห้ามแสดง raw JSON ห้ามใช้ Tag [SHOW_TABLE:...] ใดๆ\n"
+        "- แสดงผลเป็นข้อความธรรมดา หรือ Markdown Table (| col | col |) เท่านั้น ไม่ใช้ JSON หรือ Tag พิเศษ\n"
         "- ปีในข้อมูลทั้งหมดเป็น ปี พ.ศ. (Buddhist Era) ให้แสดงเป็น 'พ.ศ. XXXX' เสมอ ห้ามแปลงเป็น ค.ศ.\n"
         "\n"
         "คำถาม: \"{query}\"\n"

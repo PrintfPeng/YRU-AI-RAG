@@ -70,11 +70,14 @@ _LL_MODEL_SMALL = _LL_MODEL_FAST
 # ลดค่า Temperature เพื่อให้คำตอบมีความแม่นยำและเป็นเหตุเป็นผลสูงสุด (ลด Hallucination)
 _DEFAULT_TEMPERATURE = 0.1 
 
+# ตั้ง BYPASS_QUERY_REWRITE=true ใน .env เพื่อข้าม Query Rewriting (เหมาะกับ 8B model)
+_BYPASS_QUERY_REWRITE = os.getenv("BYPASS_QUERY_REWRITE", "false").lower() == "true"
+
 # โมเดลสำหรับจัดอันดับข้อมูลซ้ำ (Cross-Encoder Re-ranking Model)
 _RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # การตั้งค่าเกณฑ์คัดกรองความแม่นยำ (Threshold Configurations)
-MIN_SCORE_THRESHOLD = 0.01  # ลดเกณฑ์ขั้นต่ำลงมากๆ เพราะไม่มี CrossEncoder → ใช้ Semantic Score จาก Vector Search แทน
+MIN_SCORE_THRESHOLD = 0.20  # กรองเนื้อหาที่ไม่เกี่ยวข้องออก (ยิ่งสูงยิ่งเข้มงวด)
 MIN_KEYWORD_OVERLAP = 1     # ต้องมีคำสำคัญตรงกันอย่างน้อย 1 คำ (ใช้เฉพาะกรณีมี CrossEncoder)
 
 INTENT_THRESHOLDS = {
@@ -487,8 +490,9 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
             # คำนวณ score โดยให้ความสำคัญกับ: keyword score + ลำดับจาก vector search
             # เอกสารที่ได้มาจาก vector search ล้วนมีความเกี่ยวข้องในระดับหนึ่งแล้ว
             # ให้ baseline = 0.15 (ผ่าน threshold ชัดเจน) + bonus จาก keyword + penalty ตามลำดับ
-            rank_penalty = (rank / top_count) * 0.05  # ลดลงเล็กน้อยตามลำดับ
-            d.metadata["ai_score"] = min(0.6, 0.15 + kw * 0.05 - rank_penalty)
+            rank_penalty = (rank / top_count) * 0.05
+            kw_score = kw * 0.08
+            d.metadata["ai_score"] = min(0.5, kw_score - rank_penalty) if kw > 0 else 0.05
             logger.debug(f"[rerank-fallback] doc rank={rank} kw={kw} ai_score={d.metadata['ai_score']:.3f}")
 
     return scored_docs[:top_k]
@@ -708,7 +712,7 @@ async def answer_question(
     # 3. เตรียมคำถามและวิเคราะห์เจตนา (Query Preparation & Intent Analysis)
     llm_fast = _get_llm_instance(model=_LL_MODEL_FAST)
     search_query = query 
-    if chat_history and llm_fast:
+    if chat_history and llm_fast and not _BYPASS_QUERY_REWRITE:
         search_query = await _rewrite_query(query, chat_history, llm_fast)
         logger.info(f"[rag] Rewritten Query: '{query}' -> '{search_query}'")
 
@@ -784,7 +788,7 @@ async def answer_question(
             
             # [Resilience Update] ถ้ามี docs และคะแนนตัวที่ดีที่สุดไม่ได้แย่มาก (เช่น > 0.005) ให้ปล่อยผ่านไป 1 ตัว
             best_score = docs[0].metadata.get('ai_score', 0)
-            if best_score > 0.005:
+            if best_score > 0.10:
                 logger.info(f"[rag] 🛡️ Emergency Bypass: Using best doc despite low score ({best_score:.4f})")
                 relevant_docs = [docs[0]]
             else:
@@ -898,7 +902,7 @@ async def answer_question(
             "\n"
             "## ประเภทที่ 1: ข้อมูลจาก MySQL (source: mysql_planning)\n"
             "- เป็นข้อมูลโครงการ งบประมาณ ยุทธศาสตร์ แผนงาน KPI ของมหาวิทยาลัย\n"
-            "- ห้ามใส่ Tag [SHOW_TABLE:...] ใดๆ กับข้อมูลกลุ่มนี้เด็ดขาด\n"
+            "- แสดงผลเป็นข้อความธรรมดา หรือ Markdown Table (เท่านั้น)\n"
             "- ให้ตอบเป็นข้อความ / รายการ / หรือ Markdown Table (| คอลัมน์ | คอลัมน์ |) ตามความเหมาะสม\n"
             "\n"
             "## ประเภทที่ 2: ตารางจาก PDF (หัวข้อ SOURCE มีระบุ TYPE: TABLE และรหัส [SHOW_TABLE:TBL_x])\n"
