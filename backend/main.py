@@ -641,6 +641,29 @@ async def _run_rag_pipeline(query: str, doc_ids=None, messages: list = None) -> 
     answer = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", answer).strip()
     return answer
 
+async def _run_rag_pipeline_stream(query: str, doc_ids=None, messages: list = None):
+    """Async generator for streaming: yields ('status', msg) then ('answer', text)."""
+    yield ("status", "🧠 กำลังวิเคราะห์เจตนาของคำถาม...")
+    if messages:
+        query = await _contextualize_query(query, messages)
+    route = await asyncio.to_thread(route_query, query)
+    print(f"🔀 [OAI-Stream] Routed [{route.upper()}]: {query[:60]}", flush=True)
+    if route == "detail":
+        yield ("status", "🔍 กำลังค้นหารายละเอียดโครงการ...")
+        answer = await asyncio.to_thread(handle_project_detail, query)
+    elif route == "sql":
+        yield ("status", "📊 กำลังแปลงคำถามเป็นคำสั่งฐานข้อมูล (SQL)...")
+        yield ("status", "💾 กำลังดึงข้อมูลจากระบบ...")
+        answer = await asyncio.to_thread(generate_and_run_sql, query)
+    else:
+        yield ("status", "📚 กำลังค้นหาเอกสารที่เกี่ยวข้องในฐานข้อมูล...")
+        yield ("status", "🔍 กำลังเทียบเคียงเนื้อหาที่ตรงกัน...")
+        result = await answer_question(query=query, doc_ids=doc_ids, top_k=20, mode="auto")
+        answer = result.get("answer", "")
+    yield ("status", "✍️ กำลังเรียบเรียงคำตอบ...")
+    answer = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", answer).strip()
+    yield ("answer", answer)
+
 
 @app.get("/v1/models")
 async def openai_list_models():
@@ -755,27 +778,31 @@ async def openai_chat_completions(request: Request):
     if stream:
         async def event_stream():
             try:
-                answer = await _run_rag_pipeline(query, messages=messages)
-
-                # Log
-                try:
-                    append_log({"query": query, "doc_ids": None, "answer": answer, "intent": "openai_stream"})
-                except Exception:
-                    pass
-
-                # ส่ง role chunk ก่อน
+                full_answer = ""
+                # ส่ง role chunk ก่อน (OpenAI streaming format)
                 yield _build_openai_chunk("", finish_reason=None, model=model).replace(
                     '"content": ""', '"role": "assistant", "content": ""'
                 )
-
-                # ส่ง answer แบบ word-by-word เพื่อ typing effect
-                words = answer.split(" ")
+                # Stream status indicators แล้วค่อยๆ ตามด้วย answer
+                async for kind, content in _run_rag_pipeline_stream(query, messages=messages):
+                    if kind == "status":
+                        yield _build_openai_chunk(f"> {content}\n", model=model)
+                        await asyncio.sleep(0)
+                    else:
+                        full_answer = content
+                # Log
+                try:
+                    append_log({"query": query, "doc_ids": None, "answer": full_answer, "intent": "openai_stream"})
+                except Exception:
+                    pass
+                # Separator ระหว่าง status block กับ answer
+                yield _build_openai_chunk("\n", model=model)
+                # Stream answer แบบ word-by-word
+                words = full_answer.split(" ")
                 for i, word in enumerate(words):
                     text = word if i == 0 else " " + word
                     yield _build_openai_chunk(text, model=model)
-                    await asyncio.sleep(0.01)  # delay เล็กน้อยให้ดูเหมือน streaming จริง
-
-                # ส่ง finish chunk
+                    await asyncio.sleep(0.01)
                 yield _build_openai_chunk("", finish_reason="stop", model=model)
                 yield "data: [DONE]\n\n"
 
