@@ -17,6 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uuid
+from .services.smart_router import classify_intent, classify_intent_llm, call_student_bot, call_student_bot_stream
+# Smart Router
+
 
 # Internal services
 from .services.logger import append_log, read_logs
@@ -569,7 +572,10 @@ async def _contextualize_query(query: str, messages: list) -> str:
     _CTX_WORDS = [
         'อันนั้น', 'อันนี้', 'นั้น ', ' มัน', 'มัน ',
         'เพิ่มเติม', 'อธิบายเพิ่ม', 'ขยายความ', 'เหมือนกัน',
-        'ข้อที่', 'อันที่', 'ดังกล่าว', 'ที่กล่าว', 'ก่อนหน้า',
+        'ข้อที่', 'ข้อแรก', 'ข้อสุดท้าย', 'ข้อสุดท้าย',  # DEF-1: ordinal
+        'อันที่', 'อันดับที่', 'อันดับแรก', 'อันสุดท้าย',
+        'ตัวที่', 'ลำดับที่', 'รายการที่',
+        'ดังกล่าว', 'ที่กล่าว', 'ก่อนหน้า',
         'โครงการนั้น', 'โครงการนี้', 'หน่วยงานนั้น', 'หน่วยงานนี้',
     ]
     is_referential = len(q) < 25 or any(w in q for w in _CTX_WORDS)
@@ -593,16 +599,42 @@ async def _contextualize_query(query: str, messages: list) -> str:
         _llm = _LLMProvider.get_primary_llm(temperature=0.0)
         _resp = await _llm.ainvoke([
             _SystemMessage(content=(
-                'คุณคือผู้ช่วยเขียนคำถามค้นหาข้อมูลใหม่ให้สมบูรณ์ในตัวเอง\n'
-                'กฎ:\n'
-                '1. ถ้าคำถามอ้างอิงบริบทหรือมีสรรพนาม ให้แทนด้วยชื่อจริงจากบริบท\n'
-                '2. เขียนเป็นคำถามสั้นๆ ธรรมดา เหมือนพิมพ์ search ใน Google ไม่ต้องเป็นประโยคทางการ\n'
-                '3. ห้ามใส่เครื่องหมาย \' \' หรือ " " ล้อมชื่อโครงการหรือคณะ\n'
-                '4. ถ้าคำถามสมบูรณ์แล้ว ตอบเหมือนเดิมทุกประการ\n'
-                '5. ตอบเฉพาะคำถามเท่านั้น ห้ามอธิบายเพิ่ม\n'
-                'ตัวอย่าง:\n'
-                '  บริบท: พัฒนาการเรียนการสอน / ถาม: ของครุ → โครงการพัฒนาการเรียนการสอนคณะครุศาสตร์\n'
-                '  บริบท: งบประมาณปี 2568 / ถาม: ของวิทย์ล่ะ → งบประมาณคณะวิทยาศาสตร์ปี 2568'
+                '== หน้าที่ของคุณ ==\n'
+                'เขียนคำถามใหม่ให้สมบูรณ์โดยไม่ต้องพึ่งบริบทสนทนา\n'
+                'คำถามที่เขียนใหม่ต้องมีครบ 3 องค์ประกอบที่หาได้จากประวัติ:\n'
+                '  [หัวเรื่อง] เรื่องอะไร: ยุทธศาสตร์/งบประมาณ/โครงการ/พันธกิจ/KPI ฯลฯ\n'
+                '  [เอนทิตี]  ลำดับที่/ชื่อ/หน่วยงาน/คณะ (ถ้ามี)\n'
+                '  [เวลา]     ปีหรือช่วงเวลา เช่น ปี 2568 (ถ้ามี)\n'
+                '\n'
+                '== กฎเหล็ก ==\n'
+                '1. คำลำดับ (ข้อแรก/ข้อที่ N/อันดับแรก/อันสุดท้าย/ตัวที่สอง) →\n'
+                '   แปลงเป็นลำดับชัดเจน และดึง [หัวเรื่อง]+[เวลา] จากบริบทมาเติมหน้า\n'
+                '2. คำสรรพนาม (อันนั้น/มัน/ที่กล่าว/ดังกล่าว) →\n'
+                '   แทนด้วยชื่อจริงจากบริบท พร้อมระบุ [เวลา] ถ้าหาได้\n'
+                '3. ห้ามละทิ้ง [หัวเรื่อง] หรือ [เวลา] ที่หาได้จากบริบทเด็ดขาด\n'
+                '4. ถ้าคำถามสมบูรณ์แล้ว (ไม่มีสรรพนาม/ลำดับ) คืนค่าเดิมเป๊ะๆ\n'
+                '5. ตอบเฉพาะคำถามที่เขียนใหม่เท่านั้น ห้ามอธิบายหรือตอบคำถาม\n'
+                '\n'
+                '== ตัวอย่าง Few-Shot ==\n'
+                'บริบท: ผู้ใช้: ยุทธศาสตร์ของมหาวิทยาลัยราชภัฏยะลาปี 2568 มีกี่ข้อ | AI: มี 5 ข้อ\n'
+                'ถาม: ข้อแรกชื่ออะไร\n'
+                'ตอบ: ยุทธศาสตร์ข้อที่ 1 ของมหาวิทยาลัยราชภัฏยะลาในปี 2568 ชื่ออะไร\n'
+                '---\n'
+                'บริบท: ผู้ใช้: พันธกิจของ YRU มีกี่ข้อ | AI: มี 4 พันธกิจ\n'
+                'ถาม: ข้อที่ 3 คืออะไร\n'
+                'ตอบ: พันธกิจข้อที่ 3 ของมหาวิทยาลัยราชภัฏยะลาคืออะไร\n'
+                '---\n'
+                'บริบท: ผู้ใช้: โครงการในคณะวิทยาศาสตร์ปี 2567 มีเท่าไหร่ | AI: 42 โครงการ\n'
+                'ถาม: อันดับสุดท้ายคืออะไร\n'
+                'ตอบ: โครงการอันดับสุดท้ายของคณะวิทยาศาสตร์ในปี 2567 คืออะไร\n'
+                '---\n'
+                'บริบท: ผู้ใช้: งบประมาณปี 2568 | AI: 3,042,084,400 บาท\n'
+                'ถาม: แล้วปี 2569 ล่ะ\n'
+                'ตอบ: งบประมาณของมหาวิทยาลัยราชภัฏยะลาในปี 2569\n'
+                '---\n'
+                'บริบท: ผู้ใช้: โครงการพัฒนาการเรียนการสอน | AI: คณะครุศาสตร์มี 5 โครงการ\n'
+                'ถาม: ของวิทย์ล่ะ\n'
+                'ตอบ: โครงการพัฒนาการเรียนการสอนคณะวิทยาศาสตร์'
                 )),
             _HumanMessage(content=(
                 f'ประวัติสนทนา:\n{hist_str}\n\n'
@@ -851,6 +883,126 @@ async def openai_chat_completions(request: Request):
 # -----------------------------------------------------------
 # API: Redirect หน้าแรกไปยังเว็บแอปพลิเคชัน
 # -----------------------------------------------------------
+
+
+# -----------------------------------------------------------
+# Smart Router API  (Public - no login required)
+# POST /smart-router/chat        -> blocking
+# POST /smart-router/chat/stream -> SSE streaming
+# GET  /smart-router/health      -> health check
+# -----------------------------------------------------------
+
+class SmartChatRequest(BaseModel):
+    query: str
+    conversation_id: str = ""
+    user_id: str = "public-user"
+
+class SmartChatResponse(BaseModel):
+    route: str
+    answer: str
+    conversation_id: str = ""
+    sources: list = []
+    intent: str = ""
+    fallback: bool = False
+
+@app.get("/smart-router/health")
+def smart_router_health():
+    import os as _os
+    return {
+        "status": "ok",
+        "service": "yru-smart-router",
+        "student_bot_configured": bool(_os.getenv("STUDENT_BOT_API_KEY")),
+        "planning_bot": "local-rag-chromadb",
+    }
+
+@app.post("/smart-router/chat", response_model=SmartChatResponse)
+async def smart_router_chat(req: SmartChatRequest):
+    route = await classify_intent_llm(req.query)
+    print(f"[SmartRouter] route={route} | query={req.query[:60]}", flush=True)
+    if route == "student":
+        try:
+            result = call_student_bot(req.query, req.conversation_id, req.user_id)
+            return SmartChatResponse(
+                route="student",
+                answer=result["answer"],
+                conversation_id=result.get("conversation_id", ""),
+            )
+        except Exception as e:
+            # Student Bot unavailable — fall back to local RAG
+            print(f"[SmartRouter] Student bot unavailable: {e}. Falling back to RAG.", flush=True)
+            try:
+                rag_result = await answer_question(query=req.query, top_k=20, mode="auto")
+                answer_text = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", rag_result.get("answer", "")).strip()
+                return SmartChatResponse(
+                    route=route,
+                    answer=answer_text,
+                    sources=rag_result.get("sources", []),
+                    intent=rag_result.get("intent", ""),
+                    fallback=True,
+                )
+            except Exception as e2:
+                raise HTTPException(status_code=500, detail=f"Student bot and RAG both failed: {e2}")
+    else:
+        try:
+            rag_result = await answer_question(query=req.query, top_k=20, mode="auto")
+            answer_text = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", rag_result.get("answer", "")).strip()
+            return SmartChatResponse(
+                route="planning",
+                answer=answer_text,
+                sources=rag_result.get("sources", []),
+                intent=rag_result.get("intent", ""),
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"RAG error: {e}")
+
+@app.post("/smart-router/chat/stream")
+async def smart_router_stream(req: SmartChatRequest):
+    route = await classify_intent_llm(req.query)
+    print(f"[SmartRouter-Stream] route={route} | query={req.query[:60]}", flush=True)
+    SEP = "\n\n"
+
+    async def event_gen():
+        yield "data: " + json.dumps({"type": "route", "route": route}) + SEP
+        if route == "student":
+            student_ok = False
+            try:
+                for chunk in call_student_bot_stream(req.query, req.conversation_id, req.user_id):
+                    student_ok = True
+                    yield "data: " + json.dumps(chunk) + SEP
+            except Exception as e:
+                print(f"[SmartRouter-Stream] Student bot failed: {e}. Falling back to RAG.", flush=True)
+            if not student_ok:
+                # Student bot unavailable — fall back to local RAG
+                yield "data: " + json.dumps({"type": "route", "route": route, "fallback": True}) + SEP
+                try:
+                    async for kind, chunk_text in _run_rag_pipeline_stream(req.query):
+                        if kind == "status":
+                            yield "data: " + json.dumps({"type": "status", "content": chunk_text}) + SEP
+                        else:
+                            clean = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", chunk_text).strip()
+                            yield "data: " + json.dumps({"type": "content", "content": clean}) + SEP
+                            yield "data: " + json.dumps({"type": "done", "route": route}) + SEP
+                except Exception as e2:
+                    yield "data: " + json.dumps({"type": "error", "content": str(e2)}) + SEP
+        else:
+            try:
+                async for kind, chunk_text in _run_rag_pipeline_stream(req.query):
+                    if kind == "status":
+                        yield "data: " + json.dumps({"type": "status", "content": chunk_text}) + SEP
+                    else:
+                        clean = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", chunk_text).strip()
+                        yield "data: " + json.dumps({"type": "content", "content": clean}) + SEP
+                        yield "data: " + json.dumps({"type": "done", "route": "planning"}) + SEP
+            except Exception as e:
+                yield "data: " + json.dumps({"type": "error", "content": str(e)}) + SEP
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/")
 def root():
     return RedirectResponse(url="/app/index.html")
