@@ -914,6 +914,14 @@ async def answer_question(
             "2. แสดงรายการต่างๆ ด้วยรูปแบบตาราง Markdown หรือ bullet points เพื่อให้อ่านง่าย\n"
             "3. ตอบเนื้อหาได้เลยโดยไม่ต้องใส่หมายเลขอ้างอิง [SOURCE] ต่อท้ายประโยค\n"
             "\n"
+            "[Self-Critique CoT] ก่อนตอบทุกครั้ง ให้เขียนแท็ก <thought>...</thought> ก่อน (ซ่อนจากผู้ใช้)\n"
+            "เพื่อประเมิน Context ดังนี้:\n"
+            "  ถ้าไม่มีข้อมูลเกี่ยวข้องใน CONTEXT เลย → เขียน VERDICT: INSUFFICIENT\n"
+            "  ถ้ามีข้อมูลเพียงพอ → เขียน VERDICT: SUFFICIENT\n"
+            "  จาก VERDICT:\n"
+            "  INSUFFICIENT → ตอบเพียง: ไม่พบข้อมูลในเอกสารอ้างอิงของมหาวิทยาลัยครับ\n"
+            "  SUFFICIENT   → ตอบปกติ และแนบ [อ้างอิง: ชื่อไฟล์/doc_id] ต่อท้ายข้อความสำคัญ\n"
+            "\n"
             f"=== DOCUMENT CONTEXT ===\n{context_text}\n========================"
         )
 
@@ -952,6 +960,19 @@ async def answer_question(
                 answer_text = getattr(ai_response, "content", str(ai_response))
         except Exception as e_google:  
             logger.error(f"[rag] ❌ Google LLM also failed: {e_google}")
+
+    # ── [Self-Critique Post-Processing] ─────────────────────────────────────
+    _sc_pat = re.compile(r'<thought>.*?</thought>', re.DOTALL | re.IGNORECASE)
+    _sc_m = _sc_pat.search(answer_text)
+    if _sc_m:
+        _verdict_upper = _sc_m.group(0).upper()
+        answer_text = _sc_pat.sub('', answer_text).strip()
+        if 'INSUFFICIENT' in _verdict_upper:
+            print('[RAG] Self-Critique VERDICT: INSUFFICIENT → strict fallback', flush=True)
+            answer_text = 'ไม่พบข้อมูลในเอกสารอ้างอิงของมหาวิทยาลัยครับ'
+        else:
+            print('[RAG] Self-Critique VERDICT: SUFFICIENT', flush=True)
+    # ─────────────────────────────────────────────────────────────────────────
 
     # แผนสำรองระดับ 2 (Fallback Layer 2): แสดงข้อมูลดิบ (Raw Fallback) กรณีระบบ AI ขัดข้องทั้งหมด 
     # หรือบังคับแสดงตารางอัตโนมัติเพื่อป้องกันจอดับ (Zero-Downtime Design)
