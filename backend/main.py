@@ -12,14 +12,11 @@ import time
 import hashlib
 import json
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uuid
-from .services.smart_router import classify_intent, classify_intent_llm, call_student_bot, call_student_bot_stream
-# Smart Router
-
 
 # Internal services
 from .services.logger import append_log, read_logs
@@ -27,13 +24,7 @@ from .services.rag import answer_question
 from .services.vector_store import reset_vector_store_cache
 from .services.query_router import route_query
 from .services.sql_agent import generate_and_run_sql
-from .services.project_detail import handle_project_detail, _get_disambig, _clear_disambig
-from .services.llm_provider import LocalLLMProvider as _LLMProvider
-try:
-    from langchain_core.messages import HumanMessage as _HumanMessage, SystemMessage as _SystemMessage
-    _HAS_LC = True
-except ImportError:
-    _HAS_LC = False
+from .services.openwebui_register import register_with_openwebui
 
 # -----------------------------------------------------------
 # กำหนด Path สำหรับเก็บข้อมูลระบบ
@@ -43,12 +34,59 @@ CHROMA_DB_DIR = Path("chroma_db")   # โฟลเดอร์เก็บฐา
 UPLOAD_DIR = Path("uploads")        # โฟลเดอร์เก็บไฟล์ PDF ต้นฉบับที่ผู้ใช้อัปโหลดมา
 
 # -----------------------------------------------------------
-# ตั้งค่า FastAPI Application
+# ตั้งค่า FastAPI Application (with startup lifespan)
 # -----------------------------------------------------------
+from contextlib import asynccontextmanager
+
+def _warmup_models():
+    """Pre-load bge-m3 and qwen2.5 at startup so first query is not cold-starting models."""
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        from .services.embeddings import get_embedding_model
+        emb = get_embedding_model()
+        emb.embed_query("warmup")
+        log.info("[Startup] bge-m3 warmup OK")
+    except Exception as e:
+        log.warning(f"[Startup] bge-m3 warmup failed (non-fatal): {e}")
+
+    try:
+        import requests as _req
+        ollama_base = os.getenv("OPEN_WEBUI_BASE_URL", "http://172.19.0.1:11434/v1")
+        if ollama_base.endswith("/v1"):
+            ollama_base = ollama_base[:-3]
+        model = os.getenv("LLM_PRIMARY_MODEL", "qwen2.5:1.5b")
+        _req.post(
+            f"{ollama_base}/api/generate",
+            json={"model": model, "prompt": "hi", "stream": False, "keep_alive": -1},
+            timeout=120,
+        )
+        log.info(f"[Startup] {model} warmup OK")
+    except Exception as e:
+        log.warning(f"[Startup] LLM warmup failed (non-fatal): {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: ลงทะเบียน RAG backend กับ Open WebUI อัตโนมัติ และ pre-warm models"""
+    # รัน registration และ warmup แบบ non-blocking
+    try:
+        await asyncio.to_thread(register_with_openwebui)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[Startup] Open WebUI registration error (non-fatal): {e}")
+    try:
+        await asyncio.to_thread(_warmup_models)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[Startup] Model warmup error (non-fatal): {e}")
+    yield  # แอปพลิเคชันทำงานปกติหลังจากนี้
+
 app = FastAPI(
     title="AI Data Ingestion Backend",
     description="Backend for DB, Embeddings, RAG, API, and Evaluation",
     version="0.2.2 (Multi-Doc Final)",
+    lifespan=lifespan,
 )
 
 # CORS Middleware: อนุญาตให้คนในเครือข่ายมหาวิทยาลัยเข้าถึงได้
@@ -90,11 +128,47 @@ def _normalize_id(raw_id: str) -> str:
 # -----------------------------------------------------------
 @app.get("/health")
 async def health_check():
+    # ─── MySQL connectivity check ─────────────────────────────────────────────
+    import mysql.connector as _mc
+    mysql_status = "unknown"
+    mysql_error  = None
+    try:
+        _conn = _mc.connect(
+            host=os.getenv("DB_HOST", "10.10.2.154"),
+            user=os.getenv("DB_USER", "ai-sandbox-read"),
+            password=os.getenv("DB_PASSWORD", "9IKAjm.R7Qzm_OIZ"),
+            database=os.getenv("DB_NAME", "ai-sandbox_db"),
+            port=int(os.getenv("DB_PORT", 3306)),
+            connect_timeout=5,
+        )
+        _cur = _conn.cursor()
+        _cur.execute("SELECT COUNT(*) FROM projects WHERE deleted_at IS NULL")
+        _cnt = _cur.fetchone()[0]
+        _cur.close()
+        _conn.close()
+        mysql_status = f"ok (projects={_cnt})"
+    except Exception as _e:
+        mysql_status = "error"
+        mysql_error  = str(_e)
+
+    # ─── ChromaDB check ───────────────────────────────────────────────────────
+    chroma_status = "unknown"
+    try:
+        from .services.vector_store import get_vector_store
+        _vs = get_vector_store()
+        _cnt = _vs._collection.count()
+        chroma_status = f"ok (docs={_cnt})"
+    except Exception as _e:
+        chroma_status = f"error: {_e}"
+
     return {
         "status": "ok",
         "service": "backend",
         "mode": "multi_doc",
         "features": ["hybrid_ingestion", "ocr", "rag"],
+        "mysql":  mysql_status,
+        "mysql_error": mysql_error,
+        "chroma": chroma_status,
     }
 
 
@@ -104,7 +178,7 @@ async def health_check():
 class AskRequest(BaseModel):
     query: str
     doc_ids: Optional[List[str]] = None
-    top_k: int = 20
+    top_k: int = 5
     mode: Literal["auto", "text", "table", "both"] = "auto"
 
 class AskResponse(BaseModel):
@@ -132,21 +206,22 @@ async def ask(req: AskRequest):
             else:
                 sanitized_doc_ids.append(_normalize_id(did))
 
+    # 1b. Auto-detect "โครงการหมายเลข NNN" / "project_NNN" patterns in query
+    if not sanitized_doc_ids:
+        _pid_match = re.search(
+            r'(?:โครงการ(?:หมายเลข|ที่|รหัส|เลขที่|เบอร์)?\s*|project\s*[_#]?)(\d{3,})',
+            req.query, re.IGNORECASE
+        )
+        if _pid_match:
+            pid = _pid_match.group(1)
+            sanitized_doc_ids = [f"project_{pid}"]
+            print(f"🔍 [API] Auto-detected project_id={pid} → doc_ids={sanitized_doc_ids}", flush=True)
+
     # 2. ตัดสินใจเส้นทาง: SQL Agent หรือ RAG Pipeline
     route = await asyncio.to_thread(route_query, req.query)
     print(f"🔀 [API] Query routed to: [{route.upper()}]", flush=True)
 
-    if route == "detail":
-        # เส้นทาง Detail: ดึงรายละเอียดเต็มของโครงการจาก MySQL พร้อม disambiguation
-        detail_answer = await asyncio.to_thread(handle_project_detail, req.query)
-        result = {
-            "answer": detail_answer,
-            "sources": [],
-            "intent": "detail",
-            "mode": "detail",
-            "tables": [],
-        }
-    elif route == "sql":
+    if route == "sql":
         # เส้นทาง SQL: ดึงข้อมูลโครงสร้างจาก MySQL Database โดยตรง
         sql_answer = await asyncio.to_thread(generate_and_run_sql, req.query)
         result = {
@@ -553,148 +628,48 @@ def _build_openai_chunk(content: str, finish_reason=None, model: str = _RAG_MODE
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 
-async def _contextualize_query(query: str, messages: list) -> str:
-    """
-    ถ้า query อ้างอิงบริบทสนทนาก่อนหน้า (สรรพนาม/คำย่อ) ให้ LLM เขียนใหม่ให้สมบูรณ์
-    เช่น: 'มันมีงบเท่าไหร่' → 'โครงการ X มีงบประมาณเท่าไหร่'
-    """
-    if not _HAS_LC:
-        return query
-
-    # ต้องมีประวัติสนทนาอย่างน้อย 1 รอบ (user + assistant) ก่อน current query
-    non_sys = [m for m in messages if m.get('role') in ('user', 'assistant')]
-    if len(non_sys) < 3:
-        return query
-
-    q = query.strip()
-
-    # คำสรรพนาม/คำอ้างอิงที่บ่งบอกว่าต้องการบริบท
-    _CTX_WORDS = [
-        'อันนั้น', 'อันนี้', 'นั้น ', ' มัน', 'มัน ',
-        'เพิ่มเติม', 'อธิบายเพิ่ม', 'ขยายความ', 'เหมือนกัน',
-        'ข้อที่', 'ข้อแรก', 'ข้อสุดท้าย', 'ข้อสุดท้าย',  # DEF-1: ordinal
-        'อันที่', 'อันดับที่', 'อันดับแรก', 'อันสุดท้าย',
-        'ตัวที่', 'ลำดับที่', 'รายการที่',
-        'ดังกล่าว', 'ที่กล่าว', 'ก่อนหน้า',
-        'โครงการนั้น', 'โครงการนี้', 'หน่วยงานนั้น', 'หน่วยงานนี้',
-    ]
-    is_referential = len(q) < 25 or any(w in q for w in _CTX_WORDS)
-    if not is_referential:
-        return query
-
-    # สร้างประวัติสนทนา 3 รอบล่าสุด (ไม่รวม current query)
-    hist = [m for m in messages[:-1] if m.get('role') in ('user', 'assistant')]
-    hist = hist[-6:]
-    if not hist:
-        return query
-
-    hist_lines = []
-    for m in hist:
-        role_th = 'ผู้ใช้' if m.get('role') == 'user' else 'AI'
-        content = str(m.get('content', ''))[:400]
-        hist_lines.append(f'{role_th}: {content}')
-    hist_str = '\n'.join(hist_lines)
-
-    try:
-        _llm = _LLMProvider.get_primary_llm(temperature=0.0)
-        _resp = await _llm.ainvoke([
-            _SystemMessage(content=(
-                '== หน้าที่ของคุณ ==\n'
-                'เขียนคำถามใหม่ให้สมบูรณ์โดยไม่ต้องพึ่งบริบทสนทนา\n'
-                'คำถามที่เขียนใหม่ต้องมีครบ 3 องค์ประกอบที่หาได้จากประวัติ:\n'
-                '  [หัวเรื่อง] เรื่องอะไร: ยุทธศาสตร์/งบประมาณ/โครงการ/พันธกิจ/KPI ฯลฯ\n'
-                '  [เอนทิตี]  ลำดับที่/ชื่อ/หน่วยงาน/คณะ (ถ้ามี)\n'
-                '  [เวลา]     ปีหรือช่วงเวลา เช่น ปี 2568 (ถ้ามี)\n'
-                '\n'
-                '== กฎเหล็ก ==\n'
-                '1. คำลำดับ (ข้อแรก/ข้อที่ N/อันดับแรก/อันสุดท้าย/ตัวที่สอง) →\n'
-                '   แปลงเป็นลำดับชัดเจน และดึง [หัวเรื่อง]+[เวลา] จากบริบทมาเติมหน้า\n'
-                '2. คำสรรพนาม (อันนั้น/มัน/ที่กล่าว/ดังกล่าว) →\n'
-                '   แทนด้วยชื่อจริงจากบริบท พร้อมระบุ [เวลา] ถ้าหาได้\n'
-                '3. ห้ามละทิ้ง [หัวเรื่อง] หรือ [เวลา] ที่หาได้จากบริบทเด็ดขาด\n'
-                '4. ถ้าคำถามสมบูรณ์แล้ว (ไม่มีสรรพนาม/ลำดับ) คืนค่าเดิมเป๊ะๆ\n'
-                '5. ตอบเฉพาะคำถามที่เขียนใหม่เท่านั้น ห้ามอธิบายหรือตอบคำถาม\n'
-                '\n'
-                '== ตัวอย่าง Few-Shot ==\n'
-                'บริบท: ผู้ใช้: ยุทธศาสตร์ของมหาวิทยาลัยราชภัฏยะลาปี 2568 มีกี่ข้อ | AI: มี 5 ข้อ\n'
-                'ถาม: ข้อแรกชื่ออะไร\n'
-                'ตอบ: ยุทธศาสตร์ข้อที่ 1 ของมหาวิทยาลัยราชภัฏยะลาในปี 2568 ชื่ออะไร\n'
-                '---\n'
-                'บริบท: ผู้ใช้: พันธกิจของ YRU มีกี่ข้อ | AI: มี 4 พันธกิจ\n'
-                'ถาม: ข้อที่ 3 คืออะไร\n'
-                'ตอบ: พันธกิจข้อที่ 3 ของมหาวิทยาลัยราชภัฏยะลาคืออะไร\n'
-                '---\n'
-                'บริบท: ผู้ใช้: โครงการในคณะวิทยาศาสตร์ปี 2567 มีเท่าไหร่ | AI: 42 โครงการ\n'
-                'ถาม: อันดับสุดท้ายคืออะไร\n'
-                'ตอบ: โครงการอันดับสุดท้ายของคณะวิทยาศาสตร์ในปี 2567 คืออะไร\n'
-                '---\n'
-                'บริบท: ผู้ใช้: งบประมาณปี 2568 | AI: 3,042,084,400 บาท\n'
-                'ถาม: แล้วปี 2569 ล่ะ\n'
-                'ตอบ: งบประมาณของมหาวิทยาลัยราชภัฏยะลาในปี 2569\n'
-                '---\n'
-                'บริบท: ผู้ใช้: โครงการพัฒนาการเรียนการสอน | AI: คณะครุศาสตร์มี 5 โครงการ\n'
-                'ถาม: ของวิทย์ล่ะ\n'
-                'ตอบ: โครงการพัฒนาการเรียนการสอนคณะวิทยาศาสตร์'
-                )),
-            _HumanMessage(content=(
-                f'ประวัติสนทนา:\n{hist_str}\n\n'
-                f'คำถาม: \"{q}\"\n\n'
-                f'คำถามที่เขียนใหม่:'
-            ))
-        ])
-        rewritten = getattr(_resp, 'content', str(_resp)).strip().strip('"\'')
-        if rewritten and len(rewritten) > 3:
-            print(f'[CTX] Rewritten:\n  <- {q[:60]}\n  -> {rewritten[:80]}', flush=True)
-            return rewritten
-    except Exception as _ctx_err:
-        print(f'[CTX] Context rewrite skipped: {type(_ctx_err).__name__}: {_ctx_err}', flush=True)
-
-    return query
-
-
-async def _run_rag_pipeline(query: str, doc_ids=None, messages: list = None) -> str:
+async def _run_rag_pipeline(query: str, doc_ids=None) -> str:
     """รัน Query Router → SQL Agent / RAG Pipeline แล้วคืน answer string"""
-    # ── บริบทสนทนา: เขียน query ใหม่ถ้าอ้างอิงการสนทนาก่อนหน้า ──────────────
-    if messages:
-        query = await _contextualize_query(query, messages)
+    import re as _re
+
+    # Parse "Document: project_NNN\n" prefix that Open WebUI prepends for attached knowledge items
+    extracted_doc_ids = list(doc_ids) if doc_ids else []
+    _doc_prefix = _re.match(r'^Document:\s*(\S+)\s*\n', query)
+    if _doc_prefix:
+        doc_ref = _doc_prefix.group(1)          # e.g. "project_420"
+        query = query[_doc_prefix.end():].strip()
+        extracted_doc_ids.append(doc_ref)
+        # Augment query with the project number so vector search finds it
+        _num_match = _re.search(r'(\d+)', doc_ref)
+        if _num_match:
+            query = f"โครงการหมายเลข {_num_match.group(1)} {query}"
+        print(f"🔀 [OAI] Stripped doc prefix → doc_ids={extracted_doc_ids}, query: '{query[:80]}'", flush=True)
+
+    # Auto-detect project number directly in query (e.g. "โครงการหมายเลข 420")
+    if not extracted_doc_ids:
+        _pid_match = _re.search(r'(?:โครงการ(?:หมายเลข|ที่|รหัส|เลขที่|เบอร์)?\s*|project\s*[_#]?)(\d{3,})', query, _re.IGNORECASE)
+        if _pid_match:
+            pid = _pid_match.group(1)
+            extracted_doc_ids = [f"project_{pid}"]
+            print(f"🔀 [OAI] Auto-detected project_id={pid} in query → doc_ids={extracted_doc_ids}", flush=True)
 
     route = await asyncio.to_thread(route_query, query)
     print(f"🔀 [OAI] Routed to [{route.upper()}]: {query[:60]}", flush=True)
 
-    if route == "detail":
-        answer = await asyncio.to_thread(handle_project_detail, query)
-    elif route == "sql":
+    if route == "sql":
         answer = await asyncio.to_thread(generate_and_run_sql, query)
     else:
-        result = await answer_question(query=query, doc_ids=doc_ids, top_k=20, mode="auto")
+        result = await answer_question(
+            query=query,
+            doc_ids=extracted_doc_ids if extracted_doc_ids else None,
+            top_k=5,
+            mode="auto",
+        )
         answer = result.get("answer", "")
 
     # ล้าง SHOW_TABLE tags ที่อาจหลุดมา
     answer = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", answer).strip()
     return answer
-
-async def _run_rag_pipeline_stream(query: str, doc_ids=None, messages: list = None):
-    """Async generator for streaming: yields ('status', msg) then ('answer', text)."""
-    yield ("status", "🧠 กำลังวิเคราะห์เจตนาของคำถาม...")
-    if messages:
-        query = await _contextualize_query(query, messages)
-    route = await asyncio.to_thread(route_query, query)
-    print(f"🔀 [OAI-Stream] Routed [{route.upper()}]: {query[:60]}", flush=True)
-    if route == "detail":
-        yield ("status", "🔍 กำลังค้นหารายละเอียดโครงการ...")
-        answer = await asyncio.to_thread(handle_project_detail, query)
-    elif route == "sql":
-        yield ("status", "📊 กำลังแปลงคำถามเป็นคำสั่งฐานข้อมูล (SQL)...")
-        yield ("status", "💾 กำลังดึงข้อมูลจากระบบ...")
-        answer = await asyncio.to_thread(generate_and_run_sql, query)
-    else:
-        yield ("status", "📚 กำลังค้นหาเอกสารที่เกี่ยวข้องในฐานข้อมูล...")
-        yield ("status", "🔍 กำลังเทียบเคียงเนื้อหาที่ตรงกัน...")
-        result = await answer_question(query=query, doc_ids=doc_ids, top_k=20, mode="auto")
-        answer = result.get("answer", "")
-    yield ("status", "✍️ กำลังเรียบเรียงคำตอบ...")
-    answer = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", answer).strip()
-    yield ("answer", answer)
 
 
 @app.get("/v1/models")
@@ -726,70 +701,7 @@ async def openai_chat_completions(request: Request):
     stream: bool = body.get("stream", False)
     model: str = body.get("model", _RAG_MODEL_ID)
 
-    # ── ตรวจสอบ Open WebUI internal requests (tag gen, autoname, etc.) ────────
-    # Open WebUI ส่ง request พิเศษหลายแบบ ที่ไม่ใช่ query จากผู้ใช้จริงๆ
-    _all_content = " ".join(
-        str(m.get("content", "")) for m in messages
-    ).lower()
-    _is_internal_task = (
-        "generate" in _all_content and (
-            "tag" in _all_content or
-            "title" in _all_content or
-            "categoriz" in _all_content or
-            "topic" in _all_content or
-            "broad" in _all_content
-        )
-    )
-    if _is_internal_task and len(messages) <= 3:
-        # Internal Open WebUI tasks — ตอบแบบกลางๆ ไม่ดึงข้อมูล
-        _dummy = {"id":"chatcmpl-internal","object":"chat.completion","model":model,
-                  "choices":[{"index":0,"message":{"role":"assistant",
-                  "content":"general assistant topic"},"finish_reason":"stop"}]}
-        return JSONResponse(content=_dummy)
-
-    # ── ตรวจสอบว่า Open WebUI กำลังขอ follow-up suggestions หรือเปล่า ──────────
-    # Open WebUI ส่ง system message ที่มีคำว่า follow-up/question/suggest
-    # พร้อม user message สั้นๆ ขอให้ generate คำถาม
-    _sys_content = ""
-    for _m in messages:
-        if _m.get("role") == "system":
-            _c = _m.get("content", "")
-            if isinstance(_c, list):
-                _sys_content = " ".join(p.get("text","") for p in _c if isinstance(p,dict))
-            else:
-                _sys_content = str(_c)
-            break
-
-    _followup_keywords = ["follow-up", "follow up", "followup", "suggest", "question",
-                          "คำถาม", "ติดตาม", "generate", "Generate"]
-    _is_followup_req = any(kw.lower() in _sys_content.lower() for kw in _followup_keywords)
-
-    if _is_followup_req:
-        # ดูว่ามี disambiguation cache ไหม
-        _cached_options = _get_disambig()
-        if _cached_options:
-            # ส่งชื่อโครงการจริงเป็น follow-up chips
-            # แสดงแค่ส่วน suffix หลัง "หน่วยงาน" เพื่อให้ chip text สั้น
-            def _chip_label(s):
-                if " หน่วยงาน " in s:
-                    return s.split(" หน่วยงาน ")[-1]
-                if " ปี " in s:
-                    return "ปี " + s.split(" ปี ")[-1]
-                return s
-            _chip_text = "\n".join(f"{i+1}. {_chip_label(nm)}?" for i, nm in enumerate(_cached_options[:5]))
-            _followup_response = {
-                "id": f"chatcmpl-followup",
-                "object": "chat.completion",
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": _chip_text},
-                    "finish_reason": "stop"
-                }]
-            }
-            return JSONResponse(content=_followup_response)
-
-    # ── ดึง user message ล่าสุด ──────────────────────────────────────────────
+    # ดึง user message ล่าสุด
     query = ""
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -810,31 +722,27 @@ async def openai_chat_completions(request: Request):
     if stream:
         async def event_stream():
             try:
-                full_answer = ""
-                # ส่ง role chunk ก่อน (OpenAI streaming format)
+                answer = await _run_rag_pipeline(query)
+
+                # Log
+                try:
+                    append_log({"query": query, "doc_ids": None, "answer": answer, "intent": "openai_stream"})
+                except Exception:
+                    pass
+
+                # ส่ง role chunk ก่อน
                 yield _build_openai_chunk("", finish_reason=None, model=model).replace(
                     '"content": ""', '"role": "assistant", "content": ""'
                 )
-                # Stream status indicators แล้วค่อยๆ ตามด้วย answer
-                async for kind, content in _run_rag_pipeline_stream(query, messages=messages):
-                    if kind == "status":
-                        yield _build_openai_chunk(f"> {content}\n", model=model)
-                        await asyncio.sleep(0)
-                    else:
-                        full_answer = content
-                # Log
-                try:
-                    append_log({"query": query, "doc_ids": None, "answer": full_answer, "intent": "openai_stream"})
-                except Exception:
-                    pass
-                # Separator ระหว่าง status block กับ answer
-                yield _build_openai_chunk("\n", model=model)
-                # Stream answer แบบ word-by-word
-                words = full_answer.split(" ")
+
+                # ส่ง answer แบบ word-by-word เพื่อ typing effect
+                words = answer.split(" ")
                 for i, word in enumerate(words):
                     text = word if i == 0 else " " + word
                     yield _build_openai_chunk(text, model=model)
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.01)  # delay เล็กน้อยให้ดูเหมือน streaming จริง
+
+                # ส่ง finish chunk
                 yield _build_openai_chunk("", finish_reason="stop", model=model)
                 yield "data: [DONE]\n\n"
 
@@ -853,7 +761,7 @@ async def openai_chat_completions(request: Request):
         )
 
     # ── Non-Streaming Response ──────────────────────────────────────────────
-    answer = await _run_rag_pipeline(query, messages=messages)
+    answer = await _run_rag_pipeline(query)
 
     try:
         append_log({"query": query, "doc_ids": None, "answer": answer, "intent": "openai"})
@@ -883,126 +791,6 @@ async def openai_chat_completions(request: Request):
 # -----------------------------------------------------------
 # API: Redirect หน้าแรกไปยังเว็บแอปพลิเคชัน
 # -----------------------------------------------------------
-
-
-# -----------------------------------------------------------
-# Smart Router API  (Public - no login required)
-# POST /smart-router/chat        -> blocking
-# POST /smart-router/chat/stream -> SSE streaming
-# GET  /smart-router/health      -> health check
-# -----------------------------------------------------------
-
-class SmartChatRequest(BaseModel):
-    query: str
-    conversation_id: str = ""
-    user_id: str = "public-user"
-
-class SmartChatResponse(BaseModel):
-    route: str
-    answer: str
-    conversation_id: str = ""
-    sources: list = []
-    intent: str = ""
-    fallback: bool = False
-
-@app.get("/smart-router/health")
-def smart_router_health():
-    import os as _os
-    return {
-        "status": "ok",
-        "service": "yru-smart-router",
-        "student_bot_configured": bool(_os.getenv("STUDENT_BOT_API_KEY")),
-        "planning_bot": "local-rag-chromadb",
-    }
-
-@app.post("/smart-router/chat", response_model=SmartChatResponse)
-async def smart_router_chat(req: SmartChatRequest):
-    route = await classify_intent_llm(req.query)
-    print(f"[SmartRouter] route={route} | query={req.query[:60]}", flush=True)
-    if route == "student":
-        try:
-            result = call_student_bot(req.query, req.conversation_id, req.user_id)
-            return SmartChatResponse(
-                route="student",
-                answer=result["answer"],
-                conversation_id=result.get("conversation_id", ""),
-            )
-        except Exception as e:
-            # Student Bot unavailable — fall back to local RAG
-            print(f"[SmartRouter] Student bot unavailable: {e}. Falling back to RAG.", flush=True)
-            try:
-                rag_result = await answer_question(query=req.query, top_k=20, mode="auto")
-                answer_text = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", rag_result.get("answer", "")).strip()
-                return SmartChatResponse(
-                    route=route,
-                    answer=answer_text,
-                    sources=rag_result.get("sources", []),
-                    intent=rag_result.get("intent", ""),
-                    fallback=True,
-                )
-            except Exception as e2:
-                raise HTTPException(status_code=500, detail=f"Student bot and RAG both failed: {e2}")
-    else:
-        try:
-            rag_result = await answer_question(query=req.query, top_k=20, mode="auto")
-            answer_text = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", rag_result.get("answer", "")).strip()
-            return SmartChatResponse(
-                route="planning",
-                answer=answer_text,
-                sources=rag_result.get("sources", []),
-                intent=rag_result.get("intent", ""),
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"RAG error: {e}")
-
-@app.post("/smart-router/chat/stream")
-async def smart_router_stream(req: SmartChatRequest):
-    route = await classify_intent_llm(req.query)
-    print(f"[SmartRouter-Stream] route={route} | query={req.query[:60]}", flush=True)
-    SEP = "\n\n"
-
-    async def event_gen():
-        yield "data: " + json.dumps({"type": "route", "route": route}) + SEP
-        if route == "student":
-            student_ok = False
-            try:
-                for chunk in call_student_bot_stream(req.query, req.conversation_id, req.user_id):
-                    student_ok = True
-                    yield "data: " + json.dumps(chunk) + SEP
-            except Exception as e:
-                print(f"[SmartRouter-Stream] Student bot failed: {e}. Falling back to RAG.", flush=True)
-            if not student_ok:
-                # Student bot unavailable — fall back to local RAG
-                yield "data: " + json.dumps({"type": "route", "route": route, "fallback": True}) + SEP
-                try:
-                    async for kind, chunk_text in _run_rag_pipeline_stream(req.query):
-                        if kind == "status":
-                            yield "data: " + json.dumps({"type": "status", "content": chunk_text}) + SEP
-                        else:
-                            clean = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", chunk_text).strip()
-                            yield "data: " + json.dumps({"type": "content", "content": clean}) + SEP
-                            yield "data: " + json.dumps({"type": "done", "route": route}) + SEP
-                except Exception as e2:
-                    yield "data: " + json.dumps({"type": "error", "content": str(e2)}) + SEP
-        else:
-            try:
-                async for kind, chunk_text in _run_rag_pipeline_stream(req.query):
-                    if kind == "status":
-                        yield "data: " + json.dumps({"type": "status", "content": chunk_text}) + SEP
-                    else:
-                        clean = re.sub(r"\[SHOW_TABLE:[^\]]+\]", "", chunk_text).strip()
-                        yield "data: " + json.dumps({"type": "content", "content": clean}) + SEP
-                        yield "data: " + json.dumps({"type": "done", "route": "planning"}) + SEP
-            except Exception as e:
-                yield "data: " + json.dumps({"type": "error", "content": str(e)}) + SEP
-
-    return StreamingResponse(
-        event_gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
 @app.get("/")
 def root():
     return RedirectResponse(url="/app/index.html")

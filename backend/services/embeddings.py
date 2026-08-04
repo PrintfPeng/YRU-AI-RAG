@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import os
+import time
+import logging
+import requests
 from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
-from langchain_openai import OpenAIEmbeddings
+from langchain_core.embeddings import Embeddings
+
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
 # Embedding Model Configuration
 # -------------------------------------------------------------------
-# ใช้โมเดล Embedding ที่โฮสต์อยู่บน Open WebUI Server ของมหาลัย
 _EMBEDDING_MODEL_NAME = "bge-m3:latest"
 
 # -------------------------------------------------------------------
@@ -26,6 +30,60 @@ _embeddings_client = None
 # 3. ข้อมูล Metadata ทุกชนิด จะต้องถูกส่งผ่าน (Passthrough) ไปยัง Vector Store อย่างครบถ้วน
 # =============================================================================
 
+
+class OllamaDirectEmbeddings(Embeddings):
+    """
+    ใช้ Ollama native /api/embeddings แทน /v1/embeddings
+    เพราะ /v1/embeddings ทำให้ bge-m3 llama-server crash เป็นประจำ
+    """
+
+    def __init__(self, base_url: str, model: str, max_retries: int = 2, timeout: int = 150):
+        self.model = model
+        self.max_retries = max_retries
+        self.timeout = timeout
+        # ตัด /v1 ออกถ้ามี แล้วสร้าง URL ไปยัง native endpoint
+        ollama_base = base_url.rstrip('/')
+        if ollama_base.endswith('/v1'):
+            ollama_base = ollama_base[:-3]
+        self._embed_url = f"{ollama_base}/api/embeddings"
+        logger.info(f"[OllamaEmbed] Using native endpoint: {self._embed_url} model={model}")
+
+    def _embed_single(self, text: str) -> List[float]:
+        last_err = None
+        for attempt in range(self.max_retries):
+            try:
+                resp = requests.post(
+                    self._embed_url,
+                    # keep_alive=-1 keeps bge-m3 pinned in GPU memory indefinitely
+                    json={"model": self.model, "prompt": text, "keep_alive": -1},
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                emb = data.get("embedding", [])
+                if not emb:
+                    raise ValueError(f"Empty embedding: {data}")
+                return emb
+            except Exception as e:
+                last_err = e
+                if attempt < self.max_retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning(f"[OllamaEmbed] attempt {attempt+1} failed: {e}. retry in {wait}s")
+                    time.sleep(wait)
+        raise RuntimeError(f"Embedding failed after {self.max_retries} attempts: {last_err}")
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed_single(text)
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        results = []
+        for i, text in enumerate(texts):
+            results.append(self._embed_single(text))
+            if (i + 1) % 10 == 0:
+                logger.info(f"[OllamaEmbed] {i+1}/{len(texts)} embedded")
+        return results
+
+
 def get_embedding_model():
     """
     สร้างและคืนค่า Embedding Client แบบ Singleton
@@ -34,17 +92,14 @@ def get_embedding_model():
 
     if _embeddings_client is None:
         load_dotenv()
-        # ดึงค่า URL และ API Key ของ Open WebUI จากไฟล์ .env
-        base_url = os.getenv("OPEN_WEBUI_BASE_URL", "http://10.10.2.154:3000/api/v1")
-        api_key = os.getenv("OPEN_WEBUI_API_KEY", "sk-f6f4029b19cd4092bddbbfa6bb708102")
-        
-        print(f"⏳ Connecting to Remote Embedding Model: {_EMBEDDING_MODEL_NAME} at {base_url} ...")
-        
-        _embeddings_client = OpenAIEmbeddings(
-            model=_EMBEDDING_MODEL_NAME,
+        base_url = os.getenv("OPEN_WEBUI_BASE_URL", "http://172.19.0.1:11434/v1")
+        model = os.getenv("EMBEDDING_MODEL", _EMBEDDING_MODEL_NAME)
+
+        print(f"⏳ Initializing OllamaDirectEmbeddings: {model} via {base_url}")
+
+        _embeddings_client = OllamaDirectEmbeddings(
             base_url=base_url,
-            api_key=api_key,
-            check_embedding_ctx_length=False
+            model=model,
         )
 
     return _embeddings_client

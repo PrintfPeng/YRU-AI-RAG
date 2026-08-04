@@ -72,120 +72,35 @@ projects.status_id (varchar)      → statuses.status              → statuses.
 _SQL_EXAMPLES = """
 === ตัวอย่าง SQL ที่ถูกต้อง ===
 
--- ดูรายชื่อหน่วยงาน/คณะ/สำนักทั้งหมด:
-SELECT id, name AS ชื่อหน่วยงาน, level FROM departments WHERE deleted_at IS NULL ORDER BY level, id;
-
--- ดูโครงการพร้อมชื่อหน่วยงานและสถานะ (status_id คือ VARCHAR slug):
-SELECT p.id, d.name AS หน่วยงาน, s.name AS สถานะ, p.principle, pty.year
-FROM projects p
-JOIN departments d ON d.id = p.department_id
-JOIN statuses s ON s.status = p.status_id
-JOIN project_template_years pty ON pty.id = p.project_template_year_id
-WHERE pty.year = 2566 LIMIT 10;
+-- รายชื่อหน่วยงาน/คณะ/สำนักทั้งหมด:
+SELECT id, name AS ชื่อหน่วยงาน, level FROM departments WHERE deleted_at IS NULL ORDER BY level, id LIMIT 50;
 
 -- นับโครงการแยกตามหน่วยงาน:
 SELECT d.name AS หน่วยงาน, COUNT(*) AS จำนวนโครงการ
-FROM projects p
-JOIN departments d ON d.id = p.department_id
-WHERE p.deleted_at IS NULL
-GROUP BY d.id, d.name ORDER BY จำนวนโครงการ DESC;
+FROM projects p JOIN departments d ON d.id = p.department_id
+WHERE p.deleted_at IS NULL GROUP BY d.id, d.name ORDER BY จำนวนโครงการ DESC;
 
--- งบประมาณรวมตามหน่วยงานในปี 2566:
+-- งบประมาณรวมตามหน่วยงานในปีที่ระบุ (status_id = VARCHAR slug):
 SELECT d.name AS หน่วยงาน,
-       SUM(p.budget1 + p.budget2 + p.budget3 + p.budget4) AS งบรวม
+       SUM(COALESCE(p.budget1,0)+COALESCE(p.budget2,0)+COALESCE(p.budget3,0)+COALESCE(p.budget4,0)) AS งบรวม
 FROM projects p
 JOIN departments d ON d.id = p.department_id
 JOIN project_template_years pty ON pty.id = p.project_template_year_id
 WHERE pty.year = 2566 AND p.deleted_at IS NULL
 GROUP BY d.id, d.name ORDER BY งบรวม DESC;
 
--- ดูโครงการในปี 2566 ของหน่วยงานหนึ่ง (กรองด้วย d.name LIKE ไม่ใช่ project_template_years.name):
-SELECT p.id, d.name AS หน่วยงาน, st.name AS สถานะ, p.principle
+-- โครงการพร้อมชื่อหน่วยงานและสถานะ:
+SELECT py.name AS ชื่อโครงการ, d.name AS หน่วยงาน, st.name AS สถานะ, pty.year AS ปี
 FROM projects p
 JOIN departments d ON d.id = p.department_id
 JOIN statuses st ON st.status = p.status_id
 JOIN project_template_years pty ON pty.id = p.project_template_year_id
-WHERE pty.year = 2566 AND d.name LIKE '%สำนักงานอธิการบดี%' AND p.deleted_at IS NULL
-LIMIT 20;
+LEFT JOIN project_template_years py ON py.id = p.project_template_year_id
+WHERE pty.year = 2566 AND p.deleted_at IS NULL LIMIT 20;
 
--- ดูโครงการในปี 2566 ที่อยู่ในยุทธศาสตร์ที่ชื่อมี "คุณภาพการศึกษา":
-SELECT p.id, py.name AS ชื่อโครงการ, d.name AS หน่วยงาน, s.name AS ยุทธศาสตร์
-FROM projects p
-JOIN strategics s ON s.id = p.strategic_id
-JOIN departments d ON d.id = p.department_id
-JOIN project_template_years pty ON pty.id = p.project_template_year_id
-WHERE pty.year = 2566 AND s.name LIKE '%คุณภาพการศึกษา%' AND p.deleted_at IS NULL
-LIMIT 20;
-
--- ดูโครงการในปี 2566 ที่เกี่ยวกับพันธกิจวิจัย:
-SELECT p.id, py.name AS ชื่อโครงการ, d.name AS หน่วยงาน, ms.name AS พันธกิจ
-FROM projects p
-JOIN missions ms ON ms.id = p.mission_id
-JOIN departments d ON d.id = p.department_id
-JOIN project_template_years pty ON pty.id = p.project_template_year_id
-WHERE pty.year = 2566 AND ms.name LIKE '%วิจัย%' AND p.deleted_at IS NULL
-LIMIT 20;
-
--- ดูโครงการพร้อม hierarchy ครบ (ยุทธศาสตร์, พันธกิจ, แผนงาน, ผลผลิต, เป้าหมาย):
-SELECT p.id, py.name AS ชื่อโครงการ, d.name AS หน่วยงาน,
-       s.name AS ยุทธศาสตร์, ms.name AS พันธกิจ,
-       pl.name AS แผนงาน, o.name AS ผลผลิต
-FROM projects p
-JOIN departments d ON d.id = p.department_id
-JOIN strategics s ON s.id = p.strategic_id
-LEFT JOIN missions ms ON ms.id = p.mission_id
-LEFT JOIN plans pl ON pl.id = p.plan_id
-LEFT JOIN outputs o ON o.id = p.output_id
-JOIN project_template_years pty ON pty.id = p.project_template_year_id
-WHERE pty.year = 2566 AND p.deleted_at IS NULL
-LIMIT 10;
-
--- *** กฎสำคัญสำหรับการค้นหาชื่อโครงการ ***
--- ชื่อโครงการเก็บใน project_template_years.name
--- ใน DB ไม่มีคำว่า "โครงการ" นำหน้า เช่น เก็บเป็น "พัฒนาการเรียนการสอน" ไม่ใช่ "โครงการพัฒนาการเรียนการสอน"
--- ดังนั้นให้ตัดคำว่า "โครงการ" ออกก่อนแล้วค่อย LIKE search
--- ตัวอย่าง: ค้นหา "โครงการพัฒนาการเรียนการสอน" → ใช้ py.name LIKE '%พัฒนาการเรียนการสอน%'
-
--- ค้นหาโครงการด้วยชื่อ (strip คำว่า "โครงการ" ออก):
-SELECT p.id, py.name AS ชื่อโครงการ, d.name AS หน่วยงาน, py.year AS ปี,
-       (COALESCE(p.budget1,0)+COALESCE(p.budget2,0)+COALESCE(p.budget3,0)+COALESCE(p.budget4,0)) AS งบรวม,
-       p.principle AS หลักการ, p.objective AS วัตถุประสงค์
-FROM projects p
-JOIN project_template_years py ON py.id = p.project_template_year_id
-JOIN departments d ON d.id = p.department_id
-WHERE py.name LIKE '%พัฒนาการเรียนการสอน%' AND p.deleted_at IS NULL
-LIMIT 10;
-
--- ดูยุทธศาสตร์ทั้งหมดในปี 2566:
+-- ดูยุทธศาสตร์ทั้งหมด:
 SELECT id, sequence AS ลำดับ, name AS ชื่อยุทธศาสตร์ FROM strategics
 WHERE year = 2566 AND deleted_at IS NULL ORDER BY sequence;
-
--- ดูพันธกิจทั้งหมด (missions คือพันธกิจหลักของมหาวิทยาลัย ไม่ใช่ชื่อมหาวิทยาลัย):
-SELECT id, name AS ชื่อพันธกิจ FROM missions WHERE deleted_at IS NULL ORDER BY id;
-
--- *** หมายเหตุ: missions.name มีค่าเป็น "ผลิตบัณฑิต", "วิจัย", "บริการวิชาการ" ฯลฯ ***
--- *** ห้ามกรอง missions.name LIKE '%ราชภัฏยะลา%' เพราะจะได้ 0 แถว ***
--- *** ถ้าถามว่า "พันธกิจมีอะไรบ้าง" ให้ SELECT ทั้งหมดโดยไม่มี WHERE เพิ่มเติม ***
-
--- ดูโครงการที่มีตัวชี้วัด (KPI) เรื่องความพึงพอใจ:
-SELECT py.name AS ชื่อโครงการ, pk.name AS ตัวชี้วัด, d.name AS หน่วยงาน
-FROM projects p
-JOIN project_template_years py ON py.id = p.project_template_year_id
-JOIN project_kpis pk ON pk.project_id = p.id
-JOIN departments d ON d.id = p.department_id
-WHERE pk.name LIKE '%ความพึงพอใจ%'
-  AND pk.deleted_at IS NULL
-  AND p.deleted_at IS NULL
-ORDER BY d.name
-LIMIT 20;
-
--- ดูโครงการที่มีตัวชี้วัด (KPI) ตาม keyword:
-SELECT py.name AS ชื่อโครงการ, pk.name AS ตัวชี้วัด
-FROM project_kpis pk
-JOIN projects p ON p.id = pk.project_id
-JOIN project_template_years py ON py.id = p.project_template_year_id
-WHERE pk.name LIKE '%[KEYWORD]%' AND pk.deleted_at IS NULL AND p.deleted_at IS NULL
-LIMIT 20;
 ==============================================
 """
 
@@ -434,32 +349,51 @@ def _db_connect():
     )
 
 
+_STATIC_SCHEMA = """
+Table: projects
+Columns: id, department_id, plan_id, strategic_id, mission_id, output_id, tactic_id, goal_id, status_id (varchar), project_template_year_id, budget1, budget2, budget3, budget4, deleted_at
+
+Table: project_template_years
+Columns: id, name (ชื่อโครงการ), year (ปีพ.ศ.เช่น2566), deleted_at
+
+Table: departments
+Columns: id, name (ชื่อหน่วยงาน/คณะ/สำนัก), level, deleted_at
+
+Table: statuses
+Columns: status (varchar PK เช่น draft/approved), name (ชื่อสถานะ)
+
+Table: plans
+Columns: id, name (ชื่อแผนงาน), deleted_at
+
+Table: strategics
+Columns: id, name (ชื่อยุทธศาสตร์), sequence, year (พ.ศ.), deleted_at
+
+Table: missions
+Columns: id, name (เช่น ผลิตบัณฑิต/วิจัย/บริการวิชาการ), deleted_at
+
+Table: outputs
+Columns: id, name, deleted_at
+
+Table: goal_templates
+Columns: id, name
+
+Table: tactic_templates
+Columns: id, name, deleted_at
+
+Table: programs
+Columns: id, name
+
+Table: sdg_templates
+Columns: id, code, name
+
+Table: project_kpis
+Columns: id, project_id, name (ชื่อตัวชี้วัด), target, deleted_at
+"""
+
+
 def get_db_schema() -> str:
-    """
-    Return curated schema for the 12 most relevant tables only.
-    Sending all 97 tables overwhelms the 8B model and causes wrong SQL.
-    """
-    conn = None
-    try:
-        conn = _db_connect()
-        cursor = conn.cursor()
-        schema_text = ""
-        for table in _CORE_TABLES:
-            try:
-                cursor.execute(f"DESCRIBE `{table}`;")
-                columns = cursor.fetchall()
-                col_details = [f"{col[0]} ({col[1]})" for col in columns]
-                schema_text += f"Table: {table}\nColumns: {', '.join(col_details)}\n\n"
-            except Exception:
-                pass
-        return schema_text
-    except Exception as e:
-        print(f"[SQL_Agent] Error fetching schema: {e}")
-        return ""
-    finally:
-        if conn and conn.is_connected():
-            cursor.close()
-            conn.close()
+    """Return compact static schema — avoids slow DESCRIBE on 13 tables."""
+    return _STATIC_SCHEMA
 
 
 def _run_sql(sql: str) -> list:

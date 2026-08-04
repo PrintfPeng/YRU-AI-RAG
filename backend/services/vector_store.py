@@ -302,20 +302,58 @@ def search_similar(
 
     # --- 1. เตรียมเงื่อนไขสำหรับการกรองระดับฐานข้อมูล (Native Filtering Strategy) ---
     where_filter = {}
-    
+
+    # Detect "project_NNN" pattern → convert to project_id=N (int) ChromaDB filter
+    # MySQL planning docs store project_id as int, NOT doc_id string
+    _project_id_filter = None
     if sanitized_doc_ids:
+        for _did in sanitized_doc_ids:
+            _m = re.match(r'^project_(\d+)$', _did)
+            if _m:
+                _project_id_filter = int(_m.group(1))
+                logger.info(f"[vector_store] Converting 'project_{_project_id_filter}' → project_id={_project_id_filter} (int) filter")
+                break
+
+    if _project_id_filter is not None:
+        # Use the existing LangChain vectordb._collection (already connected) to call get()
+        # This avoids creating a new HttpClient that might conflict with existing Chroma settings
+        try:
+            _col = vectordb._collection  # underlying chromadb.Collection object
+            print(f"[VS] project_id filter={_project_id_filter} — calling _collection.get()", flush=True)
+            _res = _col.get(
+                where={"project_id": {"$eq": _project_id_filter}},
+                include=['metadatas', 'documents'],
+            )
+            _n = len(_res['ids']) if _res and _res['ids'] else 0
+            print(f"[VS] project_id={_project_id_filter} get() returned {_n} docs", flush=True)
+            if _n > 0:
+                from langchain_core.documents import Document as _LCDoc
+                results = [
+                    _LCDoc(page_content=doc, metadata=meta)
+                    for doc, meta in zip(_res['documents'], _res['metadatas'])
+                ]
+                print(f"[VS] Returning {len(results)} project docs: {[d.page_content[:50] for d in results]}", flush=True)
+                return results[:k]
+            else:
+                print(f"[VS] project_id={_project_id_filter}: 0 docs — falling back to global", flush=True)
+        except Exception as _e:
+            print(f"[VS] project_id get() EXCEPTION: {_e}", flush=True)
+        # Fall through to global similarity search if get() failed or returned nothing
+        where_filter = {}
+        sanitized_doc_ids = None
+    elif sanitized_doc_ids:
         if len(sanitized_doc_ids) == 1:
             where_filter["doc_id"] = sanitized_doc_ids[0]
         else:
-            where_filter = None  
-            
+            where_filter = None
+
     if sources:
         if len(sources) == 1:
             if where_filter is not None:
                 where_filter["source"] = sources[0]
         else:
-            where_filter = None  
-            
+            where_filter = None
+
     if doc_types:
         if len(doc_types) == 1:
             if where_filter is not None:
@@ -326,11 +364,11 @@ def search_similar(
     # --- 2. ดำเนินการค้นหา (Execution & Fallback Strategy) ---
     try:
         use_native_filter = where_filter is not None and where_filter != {}
-        
+
         if use_native_filter:
             logger.info(f"[vector_store] Using NATIVE filter: {where_filter}")
             results = vectordb.similarity_search(query, k=k, filter=where_filter)
-            
+
             if not results:
                 logger.warning(f"[vector_store] Native filter returned 0 results. Switching to Python filter.")
                 use_native_filter = False  

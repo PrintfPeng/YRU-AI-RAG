@@ -70,14 +70,11 @@ _LL_MODEL_SMALL = _LL_MODEL_FAST
 # ลดค่า Temperature เพื่อให้คำตอบมีความแม่นยำและเป็นเหตุเป็นผลสูงสุด (ลด Hallucination)
 _DEFAULT_TEMPERATURE = 0.1 
 
-# ตั้ง BYPASS_QUERY_REWRITE=true ใน .env เพื่อข้าม Query Rewriting (เหมาะกับ 8B model)
-_BYPASS_QUERY_REWRITE = os.getenv("BYPASS_QUERY_REWRITE", "false").lower() == "true"
-
 # โมเดลสำหรับจัดอันดับข้อมูลซ้ำ (Cross-Encoder Re-ranking Model)
 _RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # การตั้งค่าเกณฑ์คัดกรองความแม่นยำ (Threshold Configurations)
-MIN_SCORE_THRESHOLD = 0.15  # กรองเนื้อหาที่ไม่เกี่ยวข้องออก
+MIN_SCORE_THRESHOLD = 0.01  # ลดเกณฑ์ขั้นต่ำลงมากๆ เพราะไม่มี CrossEncoder → ใช้ Semantic Score จาก Vector Search แทน
 MIN_KEYWORD_OVERLAP = 1     # ต้องมีคำสำคัญตรงกันอย่างน้อย 1 คำ (ใช้เฉพาะกรณีมี CrossEncoder)
 
 INTENT_THRESHOLDS = {
@@ -490,8 +487,8 @@ def _rerank_documents(query: str, docs: list, top_k: int) -> list:
             # คำนวณ score โดยให้ความสำคัญกับ: keyword score + ลำดับจาก vector search
             # เอกสารที่ได้มาจาก vector search ล้วนมีความเกี่ยวข้องในระดับหนึ่งแล้ว
             # ให้ baseline = 0.15 (ผ่าน threshold ชัดเจน) + bonus จาก keyword + penalty ตามลำดับ
-            rank_penalty = (rank / top_count) * 0.05
-            d.metadata["ai_score"] = max(0.0, kw * 0.05 - rank_penalty)
+            rank_penalty = (rank / top_count) * 0.05  # ลดลงเล็กน้อยตามลำดับ
+            d.metadata["ai_score"] = min(0.6, 0.15 + kw * 0.05 - rank_penalty)
             logger.debug(f"[rerank-fallback] doc rank={rank} kw={kw} ai_score={d.metadata['ai_score']:.3f}")
 
     return scored_docs[:top_k]
@@ -691,7 +688,7 @@ async def _rewrite_query(query: str, history: list[dict], llm) -> str:
 async def answer_question(
     query: str,
     doc_ids: Optional[List[str]] = None,
-    top_k: int = 20,
+    top_k: int = 5,
     mode: str = "auto",
 ) -> Dict:
     
@@ -709,8 +706,17 @@ async def answer_question(
         logger.info(f"[rag] Auto-injected sticky doc_ids: {doc_ids}")
 
     # 3. เตรียมคำถามและวิเคราะห์เจตนา (Query Preparation & Intent Analysis)
+    # Only rewrite if query has ambiguous pronouns — avoids wasteful 30s LLM call for clear queries
+    _PRONOUN_MARKERS = ("เขา","เธอ","มัน","ที่นั่น","ที่นี่","ตรงนั้น","ตรงนี้","อันนั้น","อันนี้",
+                        "ของเขา","ของเธอ","ของมัน","เกรดเท่าไหร่","เป็นเท่าไหร่","ทำอะไร",
+                        "เรื่องนั้น","เรื่องนี้","แบบนั้น","แบบนี้")
+    _needs_rewrite = any(m in query for m in _PRONOUN_MARKERS)
+
     llm_fast = _get_llm_instance(model=_LL_MODEL_FAST)
-    search_query = query 
+    search_query = query
+    if chat_history and llm_fast and _needs_rewrite:
+        search_query = await _rewrite_query(query, chat_history, llm_fast)
+        logger.info(f"[rag] Rewritten Query: '{query}' -> '{search_query}'")
 
     if _detect_general_intent(query):
         return {
@@ -753,6 +759,14 @@ async def answer_question(
         if not raw_docs and sticky_doc_ids and not user_specified_doc_ids:
             logger.info("[rag] Sticky doc_ids returned 0 results → retrying without doc_id filter (global search)")
             raw_docs = search_similar(search_query, k=top_k*3, doc_ids=None, sources=None, doc_types=None)
+
+        # ── User-specified doc_ids fallback ──────────────────────────────────
+        # If user passed doc_ids (e.g. "project_420") but still got 0 results after
+        # project_id filter conversion, fall back to global search so we never
+        # return empty-handed when the collection has relevant data
+        if not raw_docs and user_specified_doc_ids:
+            logger.info("[rag] User-specified doc_ids returned 0 results → retrying with global search")
+            raw_docs = search_similar(search_query, k=top_k*3, doc_ids=None, sources=None, doc_types=None)
         # ─────────────────────────────────────────────────────────────────────
 
         if not raw_docs:
@@ -784,7 +798,7 @@ async def answer_question(
             
             # [Resilience Update] ถ้ามี docs และคะแนนตัวที่ดีที่สุดไม่ได้แย่มาก (เช่น > 0.005) ให้ปล่อยผ่านไป 1 ตัว
             best_score = docs[0].metadata.get('ai_score', 0)
-            if best_score > 0.10:
+            if best_score > 0.005:
                 logger.info(f"[rag] 🛡️ Emergency Bypass: Using best doc despite low score ({best_score:.4f})")
                 relevant_docs = [docs[0]]
             else:
@@ -821,8 +835,12 @@ async def answer_question(
             content = getattr(d, "page_content", "") or ""
             content = content.replace("\x00", "")
             
-            # [FIX] ระบุ source type ใน header ให้ LLM เห็นชัดเจน เพื่อให้ตอบกลับถูกต้อง
-            chunk_header = f"[SOURCE {i}] ID: {doc_id} | Type: {source.upper()} | Page: {page}"
+            # [FIX] ระบุ source type และ project_id ใน header ให้ LLM เห็นชัดเจน
+            project_id_val = md.get("project_id")
+            if project_id_val is not None:
+                chunk_header = f"[SOURCE {i} — รหัสโครงการ: {project_id_val}] Type: {source.upper()}"
+            else:
+                chunk_header = f"[SOURCE {i}] ID: {doc_id} | Type: {source.upper()} | Page: {page}"
 
             if source == "table":
                 table_counter += 1
@@ -855,7 +873,7 @@ async def answer_question(
                     role_key = f"role:{role}"
                     if role_key not in table_cat_map: table_cat_map[role_key] = table_map[table_ref_id]
             
-            context_parts.append(f"{chunk_header}\n{content[:3500]}")
+            context_parts.append(f"{chunk_header}\n{content[:700]}")
 
         context_text = "\n\n".join(context_parts)
 
@@ -889,38 +907,34 @@ async def answer_question(
             "\n"
             "แนวทางการตอบ:\n"
             "- ใช้ภาษาที่เป็นธรรมชาติ เหมือนการสนทนากันระหว่างเพื่อนร่วมงาน\n"
-            "- หากคำถามไม่ชัดเจน ให้ถามกลับเพื่อความเข้าใจที่ตรงกันแทนที่จะเดาคำตอบ\n"
             "- หลีกเลี่ยงการขึ้นต้นประโยคซ้ำๆ เช่น 'จากข้อมูลที่ได้รับ...' แต่ให้เข้าสู่เนื้อหาทันที\n"
             "- สรุปใจความสำคัญให้กระชับ ไม่จำเป็นต้องยกมาทั้งประโยคถ้าไม่จำเป็น\n"
             "- หากข้อมูลไม่เพียงพอ ให้ตอบอย่างสุภาพว่าไม่ทราบข้อมูลนี้ แทนการสร้างข้อมูลขึ้นมาเอง\n"
             "\n"
-            "🚨 กฎเหล็กสูงสุด — ห้าม Hallucination:\n"
-            "หากใน CONTEXT ด้านล่างไม่มีข้อมูลที่ตอบคำถามได้ ให้ตอบเพียง \"ขออภัยครับ ไม่พบข้อมูลที่ตรงกับคำถามในฐานข้อมูลของมหาวิทยาลัย\" ห้ามแต่งเรื่อง คาดเดา อธิบายกว้างๆ หรือนำความรู้ทั่วไปมาตอบเด็ดขาด\n"
+            "🔑 กฎจับคู่รหัสโครงการ:\n"
+            "ถ้าคำถามถามถึง 'โครงการหมายเลข X' หรือ 'project X' หรือ 'รหัสโครงการ X'\n"
+            "ให้ค้นหา header ที่มี 'รหัสโครงการ: X' ใน CONTEXT และตอบจากข้อมูลนั้นทันที\n"
+            "ห้ามปฏิเสธว่าไม่มีข้อมูลถ้าพบ header ที่ตรงกัน\n"
             "\n"
             "📌 กฎสำคัญ — ประเภทข้อมูลใน Context:\n"
             "\n"
             "## ประเภทที่ 1: ข้อมูลจาก MySQL (source: mysql_planning)\n"
             "- เป็นข้อมูลโครงการ งบประมาณ ยุทธศาสตร์ แผนงาน KPI ของมหาวิทยาลัย\n"
-            "- ให้แสดงผลเป็นข้อความธรรมดา (Plain Text) หรือตาราง Markdown (| คอลัมน์ | คอลัมน์ |) เท่านั้น\n"
+            "- ห้ามใส่ Tag [SHOW_TABLE:...] ใดๆ กับข้อมูลกลุ่มนี้เด็ดขาด\n"
+            "- ให้ตอบเป็นข้อความ / รายการ / หรือ Markdown Table (| คอลัมน์ | คอลัมน์ |) ตามความเหมาะสม\n"
             "\n"
-            "## ประเภทที่ 2: ตารางจาก PDF\n"
-            "- ใช้รหัส [SHOW_TABLE:TBL_x] ตามที่มีระบุไว้ในหัวข้อ SOURCE อย่างเคร่งครัดเท่านั้น\n"
+            "## ประเภทที่ 2: ตารางจาก PDF (หัวข้อ SOURCE มีระบุ TYPE: TABLE และรหัส [SHOW_TABLE:TBL_x])\n"
+            "- ให้ใช้รหัส [SHOW_TABLE:TBL_x] ตามที่ระบุในหัวข้อ SOURCE เท่านั้น\n"
+            "- ห้ามสร้างรหัสขึ้นมาเอง เช่น ห้ามพิมพ์ [SHOW_TABLE:TBL_projects]\n"
             "\n"
             "## ประเภทที่ 3: รูปภาพ (source: image)\n"
-            "- ใช้รหัส [SHOW_IMAGE: images/ชื่อไฟล์] ตาม image_path ใน SOURCE เท่านั้น\n"
+            "- ให้ใช้ [SHOW_IMAGE: images/ชื่อไฟล์] ตาม image_path ใน SOURCE เท่านั้น\n"
             "\n"
             "⚠️ กฎเหล็กเพิ่มเติม:\n"
-            "1. ตอบคำถามโดยอ้างอิงจากข้อมูลใน CONTEXT ที่ให้มาเท่านั้น\n"
-            "2. แสดงรายการต่างๆ ด้วยรูปแบบตาราง Markdown หรือ bullet points เพื่อให้อ่านง่าย\n"
-            "3. ตอบเนื้อหาได้เลยโดยไม่ต้องใส่หมายเลขอ้างอิง [SOURCE] ต่อท้ายประโยค\n"
-            "\n"
-            "[Self-Critique CoT] ก่อนตอบทุกครั้ง ให้เขียนแท็ก <thought>...</thought> ก่อน (ซ่อนจากผู้ใช้)\n"
-            "เพื่อประเมิน Context ดังนี้:\n"
-            "  ถ้าไม่มีข้อมูลเกี่ยวข้องใน CONTEXT เลย → เขียน VERDICT: INSUFFICIENT\n"
-            "  ถ้ามีข้อมูลเพียงพอ → เขียน VERDICT: SUFFICIENT\n"
-            "  จาก VERDICT:\n"
-            "  INSUFFICIENT → ตอบเพียง: ไม่พบข้อมูลในเอกสารอ้างอิงของมหาวิทยาลัยครับ\n"
-            "  SUFFICIENT   → ตอบปกติ และแนบ [อ้างอิง: ชื่อไฟล์/doc_id] ต่อท้ายข้อความสำคัญ\n"
+            "1. ต้องตอบด้วยข้อมูลจาก CONTEXT เสมอ ห้ามปฏิเสธหรือบอกว่าไม่มีข้อมูลหากมีข้อมูลอยู่ใน CONTEXT\n"
+            "2. ห้ามแต่งข้อมูลเพิ่มเติมหรือคาดเดา ตอบจาก CONTEXT เท่านั้น\n"
+            "3. ห้ามใส่ [SOURCE x] หรือ (อ้างอิงจาก SOURCE x) ท้ายคำตอบ\n"
+            "4. ถ้าข้อมูลมีหลายรายการ ให้แสดงในรูปแบบตาราง Markdown หรือรายการ bullet points\n"
             "\n"
             f"=== DOCUMENT CONTEXT ===\n{context_text}\n========================"
         )
@@ -934,13 +948,15 @@ async def answer_question(
     ai_response = None
     
     # ประกอบประวัติและคำถามปัจจุบันเข้าสู่ Message Structure
+    # truncate history to 200 chars each to prevent SQL answer blowup
     messages = [SystemMessage(content=system_prompt)]
     for msg in chat_history:
+        content = msg["content"][:200]
         if msg["role"] == "user":
-            messages.append(HumanMessage(content=msg["content"]))
+            messages.append(HumanMessage(content=content))
         else:
-            messages.append(AIMessage(content=msg["content"]))
-    messages.append(HumanMessage(content=search_query)) 
+            messages.append(AIMessage(content=content))
+    messages.append(HumanMessage(content=search_query))
 
     # แผนการทำงานหลัก (Primary Plan): เรียกใช้งาน LLM ตัวหลัก (Qwen)
     try:
@@ -960,19 +976,6 @@ async def answer_question(
                 answer_text = getattr(ai_response, "content", str(ai_response))
         except Exception as e_google:  
             logger.error(f"[rag] ❌ Google LLM also failed: {e_google}")
-
-    # ── [Self-Critique Post-Processing] ─────────────────────────────────────
-    _sc_pat = re.compile(r'<thought>.*?</thought>', re.DOTALL | re.IGNORECASE)
-    _sc_m = _sc_pat.search(answer_text)
-    if _sc_m:
-        _verdict_upper = _sc_m.group(0).upper()
-        answer_text = _sc_pat.sub('', answer_text).strip()
-        if 'INSUFFICIENT' in _verdict_upper:
-            print('[RAG] Self-Critique VERDICT: INSUFFICIENT → strict fallback', flush=True)
-            answer_text = 'ไม่พบข้อมูลในเอกสารอ้างอิงของมหาวิทยาลัยครับ'
-        else:
-            print('[RAG] Self-Critique VERDICT: SUFFICIENT', flush=True)
-    # ─────────────────────────────────────────────────────────────────────────
 
     # แผนสำรองระดับ 2 (Fallback Layer 2): แสดงข้อมูลดิบ (Raw Fallback) กรณีระบบ AI ขัดข้องทั้งหมด 
     # หรือบังคับแสดงตารางอัตโนมัติเพื่อป้องกันจอดับ (Zero-Downtime Design)

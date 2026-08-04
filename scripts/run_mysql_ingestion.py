@@ -346,7 +346,7 @@ def run_ingestion(collection_name: str = "yru_planning_data"):
         pass  # ยังไม่มี collection ก็ไม่เป็นไร
 
     # 5. Ingest in batches
-    batch_size  = 100
+    batch_size  = 20
     total_docs  = len(texts)
     total_batches = (total_docs + batch_size - 1) // batch_size
 
