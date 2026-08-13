@@ -20,3 +20,5 @@ numpy
 Pillow
 openai
 sqlalchemy
+vanna[chromadb,ollama]
+PyMySQL

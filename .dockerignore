@@ -1,0 +1,17 @@
+mysql_data/
+chroma_db/
+vanna_chroma/
+db_backup/
+uploads/
+ingested/
+*.log
+nohup.out
+backend/logs/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+yru-ai-rag-backup-*/
+.git/
+.env.local
+.DS_Store

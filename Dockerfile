@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir \
     uvicorn \
     python-dotenv \
     mysql-connector-python \
+    PyMySQL \
     langchain-core \
     langchain-community \
     langchain-chroma \
@@ -32,7 +33,8 @@ RUN pip install --no-cache-dir \
     pythainlp \
     pydantic \
     requests \
-    python-multipart
+    python-multipart \
+    "vanna[chromadb,ollama]"
 
 # เปิด Port 8005 เพื่อให้ภายนอกเข้าถึง FastAPI ได้
 EXPOSE 8005

@@ -38,6 +38,9 @@ services:
       - DB_NAME=ai_sandbox_db_local
       - DB_USER=ai-sandbox
       - DB_PASSWORD=@v6MHHiUwwbErdnV
+      # ── Vanna SQL agent (Phase 2) ──
+      - USE_VANNA_SQL=true             # Feature flag: 'true' = ใช้ Vanna, 'false' (default) = ใช้ sql_agent เดิม
+      - VANNA_CHROMA_PATH=/app/vanna_chroma   # local Chroma sqlite dir (persisted via ./:/app bind mount)
     networks:
       - rag_network
     restart: unless-stopped

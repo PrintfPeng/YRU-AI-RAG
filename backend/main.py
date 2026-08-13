@@ -223,7 +223,23 @@ async def ask(req: AskRequest):
 
     if route == "sql":
         # เส้นทาง SQL: ดึงข้อมูลโครงสร้างจาก MySQL Database โดยตรง
-        sql_answer = await asyncio.to_thread(generate_and_run_sql, req.query)
+        # Feature flag USE_VANNA_SQL: 'true' = Vanna engine, 'false' (default) = legacy sql_agent
+        # Fail-open: ถ้า Vanna ล้มด้วยเหตุใดก็ตาม จะ fallback ไป legacy โดยอัตโนมัติ (ไม่ให้เกิด 500)
+        _use_vanna = os.getenv("USE_VANNA_SQL", "false").lower() in ("true", "1", "yes", "on")
+        _sql_t0 = time.time()
+        if _use_vanna:
+            try:
+                from .services.vanna_sql import generate_and_run_sql as _vanna_sql
+                sql_answer = await asyncio.to_thread(_vanna_sql, req.query)
+                _sql_engine = "vanna"
+            except Exception as e:
+                print(f"⚠️ [API] Vanna failed ({type(e).__name__}: {str(e)[:120]}), fallback → legacy", flush=True)
+                sql_answer = await asyncio.to_thread(generate_and_run_sql, req.query)
+                _sql_engine = "vanna_failed→legacy"
+        else:
+            sql_answer = await asyncio.to_thread(generate_and_run_sql, req.query)
+            _sql_engine = "legacy"
+        print(f"🔀 [API] SQL engine={_sql_engine} elapsed={time.time()-_sql_t0:.1f}s", flush=True)
         result = {
             "answer": sql_answer,
             "sources": [],
