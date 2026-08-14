@@ -64,8 +64,11 @@ _CUSTOM_API_KEY = os.getenv("CUSTOM_API_KEY")
 _CUSTOM_API_BASE = os.getenv("CUSTOM_API_BASE")
 
 # กำหนดชื่อโมเดลหลักที่ใช้ในการประมวลผล (Primary Model)
-_LL_MODEL_FAST = os.getenv("CUSTOM_MODEL_NAME", "qwen/qwen-2.5-72b-instruct")
-_LL_MODEL_SMALL = _LL_MODEL_FAST 
+# Phase 2.7+ fix: default was 'qwen/qwen-2.5-72b-instruct' ซึ่งไม่มีบน Ollama →
+# LLM call fail แบบเงียบ → fallback template → user เห็น "ขออภัย ไม่มีข้อมูล"
+# แก้: default เป็น qwen2.5:7b (ตัวที่ pull ไว้ + fit ใน 6GB GPU)
+_LL_MODEL_FAST = os.getenv("RAG_LLM_MODEL", "qwen2.5:7b")
+_LL_MODEL_SMALL = _LL_MODEL_FAST
 
 # ลดค่า Temperature เพื่อให้คำตอบมีความแม่นยำและเป็นเหตุเป็นผลสูงสุด (ลด Hallucination)
 _DEFAULT_TEMPERATURE = 0.1 
@@ -141,12 +144,23 @@ def _sanitize_html_content(html: str) -> str:
 # Helper: LLM Provider Initialization
 # -------------------------------------------------------------------
 def _get_llm_instance(model: Optional[str] = None, temperature: float = _DEFAULT_TEMPERATURE):
-    """สร้างอินสแตนซ์ของ LLM ตัวหลักผ่านระบบ LocalLLMProvider"""
+    """สร้างอินสแตนซ์ของ LLM
+    Phase 2.7+ fix: เดิมทีทิ้ง param model เสมอ → RAG โดน stuck ที่ qwen2.5:1.5b (จาก LLM_PRIMARY_MODEL)
+    → 1.5b เล็กเกินไป extract ข้อมูลจาก Thai context ไม่ได้ → LLM refuses.
+    Fix: ถ้ามี model param มา ให้ create ChatOpenAI ตรงๆ กับ model นั้น
+    """
     if not _HAS_GENAI:
         logger.debug("[rag] langchain_openai not installed -> no LLM available")
         return None
-    
     try:
+        if model:
+            return ChatOpenAI(
+                api_key=os.getenv("OPEN_WEBUI_API_KEY", "sk-local"),
+                base_url=os.getenv("OPEN_WEBUI_BASE_URL", "http://172.19.0.1:11434/v1"),
+                model=model,
+                temperature=temperature,
+                max_tokens=1024,
+            )
         return LocalLLMProvider.get_primary_llm(temperature=temperature)
     except Exception as e:
         logger.exception("[rag] Failed to init LLM: %s", e)
@@ -257,6 +271,72 @@ def _keyword_overlap_count(query: str, text: str) -> int:
         if not q_tokens:
             return 1
         return len(q_tokens.intersection(t_tokens))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1 (Broad-query improvement): Query Expansion
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BROAD_MARKERS = [
+    "อะไรบ้าง", "ที่เกี่ยวกับ", "อธิบาย", "พรรณา", "เกี่ยวข้อง", "มีอะไร",
+    "ตัวชี้วัด", "หลักการ", "วัตถุประสงค์", "ผลที่คาดหวัง", "สรุป",
+    "ทั้งหมด", "ทุกโครงการ", "รายการ",
+]
+
+def _is_broad_query(q: str) -> bool:
+    """
+    Heuristic: query ต้องการ expansion ถ้าเป็น list/description และไม่มี code ระบุเจาะจง
+
+    True = ควร expand (broad)
+    False = specific — ใช้ query เดิม (แม่นกว่าอยู่แล้ว)
+    """
+    if not q or len(q) < 5:
+        return False
+    # ถ้ามี "id X" หรือ "รหัส X" หรือเลขตั้งแต่ 3 หลักในบริบทของโครงการ = specific
+    if re.search(r"\b(id|รหัส|เลขที่|code|no\.?)\s*[:=]?\s*\d+", q, re.IGNORECASE):
+        return False
+    if re.search(r"โครงการ\s*(หมายเลข|id|รหัส|เลขที่)?\s*\d{2,}", q, re.IGNORECASE):
+        return False
+    # มี broad marker + คำนามเชิงกว้าง = expand
+    return any(m in q for m in _BROAD_MARKERS)
+
+
+def _expand_query(query: str, llm) -> list[str]:
+    """
+    ให้ LLM ขยายคำถามเดียวเป็น 2-3 semantic variants
+    เพื่อครอบคลุม vocabulary ที่ user อาจพิมพ์ต่างกัน
+    Returns: [original, variant1, variant2, ...] (ไม่รวมกัน — deduplicate ที่ caller)
+    """
+    if llm is None:
+        return [query]
+    try:
+        prompt = (
+            "สร้างวลีค้นหา 3 แบบสำหรับ semantic search ในเอกสารระบบวางแผนมหาวิทยาลัย\n"
+            "กฎเหล็ก:\n"
+            "1. ต้อง**เก็บคำสำคัญเฉพาะเรื่อง**ทุกคำไว้เสมอ (เช่น 'ภาษาอังกฤษ', 'อาจารย์', 'สีเขียว', 'วิจัย')\n"
+            "2. เปลี่ยนได้แค่คำเสริม (อธิบาย → บอก, เป้าหมาย → วัตถุประสงค์) และ synonym\n"
+            "3. ห้ามใส่เครื่องหมายคำพูด, ไม่ต้องมีเลขนำหน้า\n"
+            "4. ตอบ 3 บรรทัด บรรทัดละ 1 วลีเท่านั้น ไม่ต้องอธิบาย\n\n"
+            "ตัวอย่าง:\n"
+            "คำถาม: อธิบายวัตถุประสงค์ของโครงการพัฒนาทักษะภาษาอังกฤษ\n"
+            "โครงการพัฒนาทักษะภาษาอังกฤษ วัตถุประสงค์\n"
+            "โครงการภาษาอังกฤษ เป้าหมาย\n"
+            "พัฒนาทักษะภาษาอังกฤษ หลักการ\n\n"
+            f"คำถาม: {query}\n"
+        )
+        resp = llm.invoke([HumanMessage(content=prompt)])
+        content = resp.content if hasattr(resp, "content") else str(resp)
+        # Clean each line: strip leading numbers/bullets/quotes
+        lines = []
+        for ln in content.split("\n"):
+            ln = re.sub(r"^[\d\-\*\.\)\s\"'`]+", "", ln).strip()
+            ln = re.sub(r"[\"'`]+$", "", ln).strip()
+            if ln and len(ln) >= 4 and ln != query and "คำถาม" not in ln:
+                lines.append(ln)
+        return [query] + lines[:3]
+    except Exception as e:
+        logger.warning(f"[rag] Query expansion failed: {e} — fallback to original")
+        return [query]
 
 
 def _filter_relevant_docs(query: str, docs: list, min_score: float = MIN_SCORE_THRESHOLD) -> list:
@@ -750,8 +830,36 @@ async def answer_question(
     raw_docs = []
 
     try:
-        # ดึงข้อมูลแบบเฉพาะเจาะจงเพื่อรักษาขอบเขตเนื้อหา
-        raw_docs = search_similar(search_query, k=top_k*3, doc_ids=sanitized_doc_ids, sources=sources_filter, doc_types=doc_types)
+        # ── Phase 1: Query expansion — ถ้าคำถามเป็นแบบกว้าง ให้ ขยายเป็น 2-3 sub-queries ก่อน retrieve
+        _broad = _is_broad_query(search_query)
+        _has_doc_ids = bool(sanitized_doc_ids)
+        print(f"[rag-phase1] search_query='{search_query[:60]}' broad={_broad} has_doc_ids={_has_doc_ids}", flush=True)
+        if _broad and not _has_doc_ids:
+            variants = _expand_query(search_query, llm_fast)
+            print(f"[rag-phase1] Broad query expanded to {len(variants)} variants: {variants[:3]}", flush=True)
+            all_docs = []
+            seen = set()
+            per_variant_k = max(3, top_k)  # ต่อ variant ดึง top_k เต็ม (จะ dedupe ต่อไป)
+            for v in variants:
+                for doc in search_similar(v, k=per_variant_k, doc_ids=None, sources=sources_filter, doc_types=doc_types):
+                    # Dedupe ด้วย content hash (docs อาจไม่มี doc_id)
+                    key = doc.metadata.get("project_id") or hash(doc.page_content[:200])
+                    if key not in seen:
+                        seen.add(key)
+                        all_docs.append(doc)
+            # !!!! Cap ต่ำเพราะ Ollama qwen2.5:7b context = 4096 tokens
+            # docs ยาว 2K chars × 3 = 6K chars ≈ 3K tokens (พอดี พร้อม prompt)
+            raw_docs = all_docs[:top_k]
+            print(f"[rag-phase1] Query expansion: {len(all_docs)} unique docs retrieved (capped to {len(raw_docs)})", flush=True)
+            # DEBUG: peek at first doc content
+            if raw_docs:
+                d0 = raw_docs[0]
+                print(f"[rag-phase1] doc[0] len={len(d0.page_content)} project_id={d0.metadata.get('project_id')}", flush=True)
+                # Print full content to check if 'หลักการ' present
+                print(f"[rag-phase1] doc[0] FULL:\n{d0.page_content}\n---END DOC[0]---", flush=True)
+        else:
+            # เดิม: ดึงข้อมูลแบบเฉพาะเจาะจงเพื่อรักษาขอบเขตเนื้อหา
+            raw_docs = search_similar(search_query, k=top_k*3, doc_ids=sanitized_doc_ids, sources=sources_filter, doc_types=doc_types)
 
         # ── Sticky-context fallback ───────────────────────────────────────────
         # ถ้า sticky_doc_ids (จาก session PDF เก่า) ทำให้ได้ 0 ผล ให้ลอง global search
@@ -943,10 +1051,14 @@ async def answer_question(
     # Generation Phase: สถาปัตยกรรมระบบทดแทนอัตโนมัติ (Smart Fallback Architecture)
     # -------------------------------------------------------------------
     llm = _get_llm_instance(model=_LL_MODEL_FAST)
-    
+    print(f"[rag-phase1] system_prompt len={len(system_prompt)} model={_LL_MODEL_FAST}", flush=True)
+    # Show whether context_text has actual doc content
+    _ctx_head = system_prompt[system_prompt.find("DOCUMENT CONTEXT"):system_prompt.find("DOCUMENT CONTEXT")+800] if "DOCUMENT CONTEXT" in system_prompt else system_prompt[-800:]
+    print(f"[rag-phase1] system_prompt tail-context: {_ctx_head[:800]!r}", flush=True)
+
     answer_text = ""
     ai_response = None
-    
+
     # ประกอบประวัติและคำถามปัจจุบันเข้าสู่ Message Structure
     # truncate history to 200 chars each to prevent SQL answer blowup
     messages = [SystemMessage(content=system_prompt)]
